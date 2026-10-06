@@ -1,5 +1,5 @@
 "use strict";
-// Cache/API and Pub/Sub can arrive out of order: compare every signal independently.
+// Compare each signal observation independently when merging cache/API responses.
 function canonicalObservationTime(stamp) {
   const date = new Date(stamp);
   if (!Number.isFinite(date.getTime())) throw new Error("Invalid observation time");

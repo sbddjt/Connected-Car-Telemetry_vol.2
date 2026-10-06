@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from shared_fleet_telemetry_policy import Backoff, SignalCollector, validate_event
 from vehicle_sqlite_buffer import VehicleSQLiteBuffer
 import vehicle_sumo_collector
-from test_server_kafka_dispatcher import event
+from test_server_kafka_producer import event
 
 
 class SignalPolicyTests(unittest.TestCase):

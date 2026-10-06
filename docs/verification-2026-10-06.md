@@ -1,3 +1,5 @@
+> 이 문서는 커밋 `9ff798d`의 이전 Dispatcher·Pub/Sub 구조를 검증한 기록입니다. 현재 Kafka 단일 수신 구조는 [후속 검증](verification-2026-10-06-kafka-only.md)을 참고하세요.
+
 # 실제 파이프라인 검증 — 2026-10-06
 
 Tesla 공개 레포의 명칭을 참고한 Python 구현을 실제 SUMO 1.27.1, Python 3.13.11, Kafka 4.3.1 브로커 3개, Redis 8.2로 검증했습니다. Redis만 모의 구현으로 바꾼 결과가 아닙니다.

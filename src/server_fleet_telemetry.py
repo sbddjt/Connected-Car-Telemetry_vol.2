@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import ssl
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -10,28 +11,59 @@ from uuid import uuid4
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from server_dispatcher import DeliveryError, DispatchRouter
+from shared_kafka import DeliveryError
+from telemetry.record import Record
 from datastore.kafka.kafka import Producer as KafkaProducer
-from datastore.simple.logger import Producer as LoggerProducer
-from datastore.redis.redis import Producer as RedisProducer
-from shared_redis_config import add_redis_arguments, finish_redis_arguments
 from shared_fleet_telemetry_policy import validate_event
 from shared_runtime_config import add_env_argument, project_path, server_config_argument
 
 
+LOG = logging.getLogger(__name__)
+
+
 class FleetTelemetryServer:
-    def __init__(self, dispatcher: DispatchRouter, max_per_connection: int = 100):
-        if max_per_connection < 1:
-            raise ValueError("max_per_connection must be positive")
-        self.dispatcher = dispatcher
+    def __init__(self, producer: KafkaProducer, max_per_connection: int = 100,
+                 max_notification_tasks: int = 100):
+        if max_per_connection < 1 or max_notification_tasks < 1:
+            raise ValueError("Queue limits must be positive")
+        self.producer = producer
         self.max_per_connection = max_per_connection
+        self.max_notification_tasks = max_notification_tasks
+        self.notification_tasks = set()
+        self.notification_failures = 0
+        self.notification_dropped = 0
+        self.closed = False
+
+    async def _send_notification(self, record_type, record):
+        try:
+            await self.producer.produce(Record.from_event(record_type, record))
+        except Exception as error:
+            self.notification_failures += 1
+            LOG.warning("Kafka notification failed: type=%s event_id=%s error=%s",
+                        record_type, record["event_id"], error)
 
     def _notify(self, record_type, vehicle_id, connection_id, **fields):
-        self.dispatcher.notify(record_type, {
+        # 연결/오류 기록은 차량 ACK를 지연시키지 않는 제한된 메모리 작업입니다.
+        if self.closed or len(self.notification_tasks) >= self.max_notification_tasks:
+            self.notification_dropped += 1
+            return
+        record = {
             "event_id": str(uuid4()), "vehicle_id": vehicle_id,
             "event_time": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
             "connection_id": connection_id, **fields,
-        })
+        }
+        task = asyncio.create_task(self._send_notification(record_type, record))
+        self.notification_tasks.add(task)
+        task.add_done_callback(self.notification_tasks.discard)
+
+    async def close(self, timeout=5.0):
+        self.closed = True
+        tasks = set(self.notification_tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle(self, socket):
         tasks = set()
@@ -48,6 +80,7 @@ class FleetTelemetryServer:
             vehicle_id = hello["vehicle_id"]
             await socket.send(json.dumps({"type": "ready", "vehicle_id": vehicle_id}))
             connected = True
+            LOG.info("Vehicle connected: vehicle_id=%s connection_id=%s", vehicle_id, connection_id)
             self._notify("connectivity", vehicle_id, connection_id, status="connected")
             async for raw in socket:
                 event_id = None
@@ -87,12 +120,13 @@ class FleetTelemetryServer:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             if connected:
+                LOG.info("Vehicle disconnected: vehicle_id=%s connection_id=%s", vehicle_id, connection_id)
                 self._notify("connectivity", vehicle_id, connection_id, status="disconnected")
 
     async def _deliver(self, socket, event, connection_id=None):
         try:
             try:
-                await self.dispatcher.dispatch("V", event)
+                await self.producer.produce(Record.from_event("V", event))
             except DeliveryError as error:
                 self._notify("errors", event["vehicle_id"], connection_id, stage="kafka_delivery",
                              source_event_id=event["event_id"], error=str(error))
@@ -112,29 +146,17 @@ class FleetTelemetryServer:
             pass
 
 
-async def poll_kafka(dispatcher, stop):
+async def poll_kafka(producer, stop):
     while not stop.is_set():
-        dispatcher.poll()
+        producer.poll()
         await asyncio.sleep(0.01)
 
 
-def build_dispatch_router(args, *, kafka_dispatcher=None, logger_dispatcher=None, redis_dispatcher=None):
-    kafka = kafka_dispatcher if kafka_dispatcher is not None else KafkaProducer(
+def build_kafka_producer(args):
+    return KafkaProducer(
         args.kafka_bootstrap_servers, args.kafka_vehicle_topic, args.kafka_message_timeout_ms,
         topics=args.kafka_topics,
     )
-    dispatchers = {"kafka": kafka}
-    if any("logger" in targets for targets in args.dispatch_records.values()):
-        dispatchers["logger"] = logger_dispatcher if logger_dispatcher is not None else LoggerProducer(
-            verbose=args.dispatch_logger_verbose,
-        )
-    if any("redis" in targets for targets in args.dispatch_records.values()):
-        dispatchers["redis"] = redis_dispatcher if redis_dispatcher is not None else RedisProducer(
-            args.server_redis_url, args.redis_namespace, args.redis_publish_vin_topics,
-            args.redis_subscriber_set_prefix, args.redis_publish_timeout / 1_000_000_000,
-            client_options=args.redis_client_options,
-        )
-    return DispatchRouter(dispatchers, args.dispatch_records, args.reliable_ack_sources)
 
 
 async def run_server(args):
@@ -146,23 +168,22 @@ async def run_server(args):
         tls.load_cert_chain(args.certfile, args.keyfile)
         tls.load_verify_locations(args.client_ca)
         tls.verify_mode = ssl.CERT_REQUIRED
-    router = build_dispatch_router(args)
+    producer = build_kafka_producer(args)
+    receiver = FleetTelemetryServer(producer)
     stop = asyncio.Event()
-    polling = asyncio.create_task(poll_kafka(router, stop))
+    polling = asyncio.create_task(poll_kafka(producer, stop))
     try:
-        async with serve(FleetTelemetryServer(router).handle, args.server_host, args.server_port, ssl=tls, max_size=1_000_000):
+        async with serve(receiver.handle, args.server_host, args.server_port, ssl=tls, max_size=1_000_000):
             print(f"[수신 서버] {'wss' if tls else 'ws'}://{args.server_host}:{args.server_port}")
             await asyncio.Event().wait()
     finally:
-        await router.close()
+        await receiver.close()
         stop.set()
         with contextlib.suppress(asyncio.CancelledError):
             await polling
-        if "redis" in router.dispatchers:
-            await router.dispatchers["redis"].close()
-        router.dispatchers["kafka"].close()
-        print(f"[Dispatcher 종료] 선택 목적지 실패={router.optional_failures} | "
-              f"한도 초과 접수 제외={router.optional_dropped}")
+        producer.close()
+        LOG.info("Receiver stopped: notification_failures=%s notification_dropped=%s",
+                 receiver.notification_failures, receiver.notification_dropped)
 
 
 def parse_args(argv=None):
@@ -191,7 +212,6 @@ def parse_args(argv=None):
                      env="SERVER_TLS_KEY_FILE", default=tls.get("server_key"), type=project_path)
     add_env_argument(parser, "--server-tls-client-ca", aliases=("--client-ca",), dest="client_ca",
                      env="SERVER_TLS_CLIENT_CA_FILE", default=tls.get("ca_file"), type=project_path)
-    add_redis_arguments(parser, config)
     args = parser.parse_args(argv)
     if not 1 <= args.server_port <= 65535 or args.kafka_message_timeout_ms < 1:
         parser.error("Require valid server port and positive Kafka message timeout")
@@ -202,13 +222,11 @@ def parse_args(argv=None):
     if (any(not name for name in args.kafka_topics.values())
             or len(set(args.kafka_topics.values())) != len(args.kafka_topics)):
         parser.error("Kafka record types require distinct nonempty topics")
-    args.dispatch_records = config["records"]
-    args.reliable_ack_sources = config["reliable_ack_sources"]
-    args.dispatch_logger_verbose = config["logger"].get("verbose", False)
-    return finish_redis_arguments(parser, args, config)
+    return args
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     try:
         asyncio.run(run_server(args))

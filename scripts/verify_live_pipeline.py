@@ -19,11 +19,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from confluent_kafka import Consumer
 from confluent_kafka.admin import AdminClient, NewTopic
 from redis import Redis
-from redis.asyncio import Redis as AsyncRedis
 from redis.backoff import NoBackoff
 from redis.retry import Retry
-from server_fleet_telemetry import FleetTelemetryServer, build_dispatch_router, parse_args
-from datastore.simple.logger import Producer as LoggerProducer
+from server_fleet_telemetry import FleetTelemetryServer, build_kafka_producer, parse_args
 from server_redis_latest_store import RedisLatestVehicleStore
 from server_redis_projection_consumer import RedisProjectionWorker
 from server_telemetry_consumer import persist_and_commit
@@ -86,22 +84,21 @@ async def main(fault_injection, report_path):
             for item in containers), "Refuse to stop another project's containers"
     report={"time_kst":datetime.now(timezone(timedelta(hours=9))).isoformat(),
         "brokers":len(metadata.brokers),"namespace":namespace,"checks":{}}
-    tasks=[]; consumers=[]; stopped=set(); stop=asyncio.Event(); logger_lines=[]; published=[]
+    tasks=[]; consumers=[]; stopped=set(); stop=asyncio.Event()
     options={"decode_responses":True,"protocol":2,"socket_timeout":1,"socket_connect_timeout":1,
              "retry":Retry(NoBackoff(),0)}
     cache=RedisLatestVehicleStore(prefix=f"{namespace}:{{query}}",client_options=options)
-    subscriber=AsyncRedis.from_url("redis://127.0.0.1:6380/0",decode_responses=True,protocol=2)
-    pubsub=subscriber.pubsub(ignore_subscribe_messages=True)
-    router=None; server=None; http_server=None
+    producer=None; receiver=None; server=None; http_server=None
     with tempfile.TemporaryDirectory(prefix="telemetry-v2-verification-") as temporary:
         directory=Path(temporary)
         buffer=VehicleSQLiteBuffer(directory/"vehicle.db")
         history=ServerTelemetryStore(directory/"history.db")
         config=json.loads((ROOT/"config/server_fleet_telemetry_config.json").read_text(encoding="utf-8"))
-        config["kafka_topics"]=topics; config["namespace"]=namespace
+        config["kafka_topics"]=topics
         config_path=directory/"config.json"; config_path.write_text(json.dumps(config),encoding="utf-8")
         args=parse_args(["--config",str(config_path),"--kafka-message-timeout-ms","1500"])
-        router=build_dispatch_router(args,logger_dispatcher=LoggerProducer(writer=logger_lines.append))
+        producer=build_kafka_producer(args)
+        receiver=FleetTelemetryServer(producer)
         def consumer(suffix,topic):
             client=Consumer({"bootstrap.servers":BOOTSTRAP,"group.id":namespace+suffix,
                 "auto.offset.reset":"earliest","enable.auto.commit":False,"enable.auto.offset.store":False,
@@ -115,7 +112,7 @@ async def main(fault_injection, report_path):
         seen=set(); operational=[]; keys=[]
         async def poll():
             while not stop.is_set():
-                router.poll()
+                producer.poll()
                 message=history_consumer.poll(0)
                 if message is not None and not message.error():
                     persist_and_commit(message,history,history_consumer)
@@ -130,11 +127,6 @@ async def main(fault_injection, report_path):
         async def project():
             while not stop.is_set():
                 await asyncio.to_thread(worker.process_once)
-        async def watch():
-            while not stop.is_set():
-                message=await pubsub.get_message(timeout=.2)
-                if message and message["type"]=="pmessage": published.append(json.loads(message["data"]))
-                await asyncio.sleep(.01)
         async def collect():
             sumo=ET.Element("configuration"); inputs=ET.SubElement(sumo,"input")
             for name,file in (("net-file","osm.net.xml.gz"),("route-files","osm.passenger.trips.xml")):
@@ -149,32 +141,30 @@ async def main(fault_injection, report_path):
             if process.returncode: raise RuntimeError(output.decode(errors="replace"))
             return output.decode(errors="replace")
         try:
-            server=await serve(FleetTelemetryServer(router).handle,"127.0.0.1",0)
+            server=await serve(receiver.handle,"127.0.0.1",0)
             fleet=SimulatedFleetTelemetryClients(buffer,
                 fleet_telemetry_server_url=f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}",
                 ack_timeout=4,retry_seconds=.25,retry_max_seconds=2)
             print("[live] SUMO roundtrip",flush=True)
-            await pubsub.psubscribe(namespace+"_V_*"); await pubsub.get_message(timeout=1)
             tasks=[asyncio.create_task(poll()),asyncio.create_task(project())]
             await collect()
             initial=buffer.get_pending(limit=10000); assert initial, "SUMO produced no selected records"
             expected={record["event_id"] for record in initial}
-            watcher=asyncio.create_task(watch()); tasks.append(watcher)
             tasks.append(asyncio.create_task(fleet.run(stop)))
             await wait_until(lambda:not buffer.get_pending() and expected<=seen,"SUMO to Kafka/history")
             first=initial[0]
             await wait_until(lambda:cache.get_vehicle(first["vehicle_id"]) is not None,"Redis latest state")
-            await wait_until(lambda:expected<={r["event_id"] for r in published},"VIN Pub/Sub delivery")
             assert set(keys)>={record["vehicle_id"] for record in initial}
-            assert logger_lines
             report["checks"]["sumo_roundtrip"]={"messages":len(expected),"vehicles":len({r["vehicle_id"] for r in initial}),
-                "buffer_remaining":len(buffer.get_pending()),"pubsub_messages":len(published),"logger_lines":len(logger_lines)}
-            http_server=ThreadingHTTPServer(("127.0.0.1",0),make_query_handler(cache,namespace))
+                "buffer_remaining":len(buffer.get_pending()),"receiver_destination":"kafka"}
+            http_server=ThreadingHTTPServer(("127.0.0.1",0),make_query_handler(cache))
             thread=threading.Thread(target=http_server.serve_forever,daemon=True); thread.start()
             status,body=await asyncio.to_thread(request,http_server,"/api/vehicles?signals=location")
             assert status==200 and json.loads(body)["vehicles"]
             report["checks"]["redis_query_api"]={"status":status}
-            watcher.cancel(); await asyncio.gather(watcher,return_exceptions=True)
+            status,_=await asyncio.to_thread(request,http_server,"/api/stream")
+            assert status==404
+            report["checks"]["removed_pubsub_stream"]={"status":status}
             if fault_injection:
                 print("[live] Redis outage/recovery",flush=True)
                 await docker("compose","stop","redis-query"); stopped.add("redis-query")
@@ -226,12 +216,11 @@ async def main(fault_injection, report_path):
             for task in tasks: task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
             if server: server.close(); await server.wait_closed()
-            if router:
-                await router.close(); await router.dispatchers["redis"].close(); router.dispatchers["kafka"].close()
+            if receiver: await receiver.close()
+            if producer: producer.close()
             for client in consumers: await asyncio.to_thread(client.close)
             if http_server:
-                http_server.query_stopping=True; await asyncio.to_thread(http_server.shutdown); http_server.server_close()
-            await pubsub.aclose(); await subscriber.aclose()
+                await asyncio.to_thread(http_server.shutdown); http_server.server_close()
             scratch_keys=list(cache.client.scan_iter(namespace+":*"))
             if scratch_keys: cache.client.delete(*scratch_keys)
             cache.close(); history.close(); buffer.close()

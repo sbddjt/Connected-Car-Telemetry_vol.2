@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import http.client
 import io
@@ -14,76 +13,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import fakeredis
-from fakeredis.aioredis import FakeRedis as AsyncFakeRedis
 from confluent_kafka import TopicPartition, KafkaException
 from redis.exceptions import ConnectionError, ResponseError
-from server_dispatcher import DispatchRouter, DeliveryError
-from server_redis_dispatcher import RedisDispatcher
 from server_redis_latest_store import RedisLatestVehicleStore
 from server_redis_projection_consumer import RedisProjectionWorker, project_and_commit, parse_args as projection_args
 from server_vehicle_query_api import make_query_handler, parse_args as query_args
 from server_fleet_telemetry import parse_args as receiver_args
-from test_server_kafka_dispatcher import event, until
-
-
-class RedisDispatcherTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.fake_server = fakeredis.FakeServer()
-        self.client = AsyncFakeRedis(server=self.fake_server, decode_responses=True)
-        self.dispatcher = RedisDispatcher(client=self.client)
-        self.addAsyncCleanup(self.dispatcher.close)
-
-    async def test_vehicle_channel_carries_raw_record(self):
-        async with self.client.pubsub() as subscriber:
-            await subscriber.subscribe("telemetry_v2_V_{car-1}")
-            await subscriber.get_message(timeout=1)
-            original = event()
-            await self.dispatcher.dispatch("V", original)
-            message = await subscriber.get_message(ignore_subscribe_messages=True, timeout=1)
-            self.assertEqual(json.loads(message["data"]), original)
-            self.assertEqual(message["channel"], "telemetry_v2_V_{car-1}")
-
-    async def test_zero_subscribers_is_success(self):
-        await self.dispatcher.dispatch("V", event())
-        self.assertEqual(self.dispatcher.published_count, 1)
-        self.assertEqual(self.dispatcher.vehicle_channel("errors", "car-1"), "telemetry_v2_errors_{car-1}")
-
-    async def test_subscriber_leases_expire_strictly_before_current_second(self):
-        dispatcher = RedisDispatcher(client=self.client, subscriber_set_prefix="leases", clock=lambda:100)
-        key = "leases_telemetry_v2_V_{car-1}"
-        await self.client.zadd(key, {"expired":99, "at-boundary":100, "future":101})
-        self.assertEqual(await dispatcher.channels_for_record("V", event()),
-                         ["at-boundary", "future", "telemetry_v2_V_{car-1}"])
-        self.assertEqual(await self.client.zrange(key, 0, -1), ["at-boundary", "future"])
-
-    async def test_leased_channels_can_replace_vehicle_channel(self):
-        dispatcher = RedisDispatcher(client=self.client, publish_vin_topics=False,
-                                     subscriber_set_prefix="leases", clock=lambda:100)
-        await self.client.zadd("leases_telemetry_v2_V_{car-1}", {"dashboard-channel":200})
-        self.assertEqual(await dispatcher.channels_for_record("V", event()), ["dashboard-channel"])
-        with self.assertRaises(ValueError):
-            RedisDispatcher(publish_vin_topics=False)
-
-    async def test_redis_down_does_not_block_kafka_vehicle_ack(self):
-        self.fake_server.connected = False
-        class Kafka:
-            async def dispatch(self, kind, record):
-                pass
-        router = DispatchRouter({"kafka":Kafka(), "redis":self.dispatcher},
-                                {"V":["kafka","redis"]}, {"V":"kafka"})
-        try:
-            await asyncio.wait_for(router.publish(event()), .5)
-            await until(lambda:router.optional_failures.get(("V","redis")) == 1)
-        finally:
-            await router.close()
-
-    async def test_publish_timeout_is_bounded(self):
-        class SlowRedis:
-            async def publish(self, *args):
-                await asyncio.Event().wait()
-        dispatcher = RedisDispatcher(client=SlowRedis(), timeout_seconds=.02)
-        with self.assertRaises(DeliveryError):
-            await asyncio.wait_for(dispatcher.dispatch("V", event()), .5)
+from test_server_kafka_producer import event
 
 
 class RedisStoreTests(unittest.TestCase):
@@ -257,51 +193,30 @@ class RedisQueryAPITests(unittest.TestCase):
         for path in ("/api/vehicles?limit=201","/api/vehicles?offset=-1","/api/vehicles?signals=secret"):
             self.assertEqual(self.request(path)[0],400)
 
-    def test_redis_down_returns_503_for_cache_health_and_stream(self):
+    def test_redis_down_returns_503_for_cache_and_health(self):
         self.fake_server.connected=False
-        for path in ("/api/vehicles","/api/health","/api/stream"):
+        for path in ("/api/vehicles","/api/health"):
             code,body,_=self.request(path)
             self.assertEqual(code,503,path); self.assertIn("temporarily unavailable",body.decode())
 
-    def test_pubsub_is_streamed_as_sse_with_safe_sequence(self):
-        connection=http.client.HTTPConnection("127.0.0.1",self.server.server_port,timeout=3)
-        try:
-            connection.request("GET","/api/stream?vehicle_id=car-1"); response=connection.getresponse()
-            self.assertEqual(response.status,200)
-            self.assertEqual(response.readline(),b": connected\n"); response.readline()
-            record=event(); record["sequence_no"]=2**60+1
-            record["event_time"]="2026-10-06T09:00:01.000001+09:00"
-            self.client.publish("telemetry_v2_V_{car-1}",json.dumps(record))
-            data=response.readline().decode()
-            self.assertTrue(data.startswith("data: "))
-            self.assertEqual(json.loads(data[6:])["sequence_no"],str(2**60+1))
-            self.assertEqual(json.loads(data[6:])["event_time"],"2026-10-06T00:00:01.000001Z")
-        finally: connection.close()
+    def test_cache_query_works_without_any_pubsub_messages(self):
+        self.store.save(event(10))
+        self.store.save(event(1))
+        code,body,_=self.request("/api/vehicles/car-1")
+        self.assertEqual(code,200)
+        self.assertEqual(json.loads(body)["vehicle"]["signals"]["speed_mps"],10)
+        self.assertEqual(self.request("/api/stream")[0],404)
 
-    def test_api_registers_lease_and_receives_only_its_destination_channel(self):
-        self.server.shutdown(); self.server.server_close(); self.thread.join()
-        self.server=ThreadingHTTPServer(("127.0.0.1",0), make_query_handler(
-            self.store, publish_vin_topics=False, subscriber_set_prefix="leases"))
-        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True); self.thread.start()
-        self.assertEqual(self.request("/api/stream")[0],400)
-        connection=http.client.HTTPConnection("127.0.0.1",self.server.server_port,timeout=3)
-        try:
-            connection.request("GET","/api/stream?vehicle_id=car-1"); response=connection.getresponse()
-            self.assertEqual(response.status,200); response.readline(); response.readline()
-            channels=self.client.zrange("leases_telemetry_v2_V_{car-1}",0,-1)
-            self.assertEqual(len(channels),1)
-            self.client.publish(channels[0],json.dumps(event()))
-            self.assertEqual(json.loads(response.readline().decode()[6:])["vehicle_id"],"car-1")
-        finally: connection.close()
 
 
 class RedisConfigTests(unittest.TestCase):
     def test_shared_connection_env_and_separate_kafka_group(self):
-        with patch.dict("os.environ",{"SERVER_REDIS_URL":"redis://localhost:6388/2","SERVER_REDIS_NAMESPACE":"test","SERVER_REDIS_PASSWORD":"password"}):
-            for parse in (receiver_args,projection_args,query_args):
+        with patch.dict("os.environ",{"SERVER_REDIS_URL":"redis://localhost:6388/2","SERVER_REDIS_PASSWORD":"password"}):
+            for parse in (projection_args,query_args):
                 args=parse([])
                 self.assertEqual(args.server_redis_url,"redis://localhost:6388/2")
                 self.assertEqual(args.redis_client_options["password"],"password")
+            self.assertFalse(hasattr(receiver_args([]),"server_redis_url"))
             self.assertEqual(projection_args([]).kafka_redis_consumer_group,"telemetry-redis-latest-v1")
     def test_invalid_url_and_timeout_rejected(self):
         for args in (["--redis-url","https://localhost"],["--redis-socket-timeout-seconds","nan"]):

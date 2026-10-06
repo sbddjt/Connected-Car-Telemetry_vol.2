@@ -9,7 +9,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from server_telemetry_store import ServerTelemetryStore
 from server_telemetry_consumer import persist_and_commit
-from test_server_kafka_dispatcher import event
+from test_server_kafka_producer import event
 
 
 class ServerTelemetryStoreTests(unittest.TestCase):

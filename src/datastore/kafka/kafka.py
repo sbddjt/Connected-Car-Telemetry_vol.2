@@ -5,7 +5,7 @@ from telemetry.record import Record
 from datetime import datetime, timezone
 
 from confluent_kafka import KafkaException, Producer
-from server_dispatcher import DEFAULT_KAFKA_TOPICS, DeliveryError
+from shared_kafka import DEFAULT_KAFKA_TOPICS, DeliveryError
 
 
 class Producer:
@@ -40,11 +40,7 @@ class Producer:
             future.exception()
 
     async def publish(self, event: dict) -> None:
-        await self.dispatch("V", event)
-
-    async def dispatch(self, record_type, record):
-        """이전 Python 호출과의 호환. 새 코드는 produce(Record)를 사용합니다."""
-        await self.produce(Record.from_event(record_type, record))
+        await self.produce(Record.from_event("V", event))
 
     async def produce(self, entry: Record) -> None:
         record_type, event = entry.tx_type, entry.data

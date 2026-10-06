@@ -3,7 +3,6 @@ const element = id => document.getElementById(id);
 let offset = 0, searchId = "", total = 0, loading = false;
 const limit = 50;
 const visibleStates = new Map();
-let liveStream;
 let viewGeneration = 0, activeRequest;
 function mergeState(incoming) {
   const state = mergeVehicleState(visibleStates.get(incoming.vehicle_id), incoming);
@@ -13,32 +12,7 @@ function mergeState(incoming) {
 function changeView(clear=true) {
   viewGeneration++; activeRequest?.abort(); loading = false;
   if (clear) visibleStates.clear();
-  render([...visibleStates.values()]); openLiveStream(); refresh();
-}
-function openLiveStream() {
-  liveStream?.close();
-  const query = searchId ? "?vehicle_id=" + encodeURIComponent(searchId) : "";
-  liveStream = new EventSource("/api/stream" + query);
-  const generation = viewGeneration;
-  liveStream.onmessage = message => {
-    if (generation !== viewGeneration) return;
-    try {
-      const record = JSON.parse(message.data);
-      if (searchId && record.vehicle_id !== searchId) return;
-      if (!visibleStates.has(record.vehicle_id) && (visibleStates.size >= limit || offset > 0)) return;
-      const observations = {};
-      const signals = record.signals ?? {
-        ...(record.latitude != null && record.longitude != null ? {location:{latitude:record.latitude,longitude:record.longitude}} : {}),
-        ...(record.speed_mps != null ? {speed_mps:record.speed_mps} : {})
-      };
-      for (const [signal,value] of Object.entries(signals))
-        observations[signal] = {value,event_time:record.event_time,run_id:record.run_id,sequence_no:record.sequence_no};
-      if (!Object.keys(observations).length) return;
-      mergeState({vehicle_id:record.vehicle_id,observations});
-      total = Math.max(total,visibleStates.size);
-      render([...visibleStates.values()]);
-    } catch {}
-  };
+  render([...visibleStates.values()]); refresh();
 }
 function timeText(stamp) {
   return stamp ? new Date(stamp).toLocaleTimeString("ko-KR", {hour12:false}) : "—";
@@ -119,5 +93,4 @@ element("previous").addEventListener("click", () => { offset = Math.max(0,offset
 element("next").addEventListener("click", () => { offset += limit; changeView(); });
 setInterval(() => { if (element("auto-refresh").checked && !document.hidden) refresh(); },1000);
 refresh();
-openLiveStream();
-window.addEventListener("beforeunload", () => liveStream?.close());
+window.addEventListener("beforeunload", () => activeRequest?.abort());

@@ -4,7 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
-from server_dispatcher import DEFAULT_KAFKA_TOPICS, SUPPORTED_DISPATCHERS, validate_dispatch_rules
+from shared_kafka import DEFAULT_KAFKA_TOPICS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VEHICLE_TELEMETRY_CONFIG = PROJECT_ROOT / "config" / "vehicle_fleet_telemetry_config.json"
@@ -59,7 +59,7 @@ def load_vehicle_telemetry_config(path):
 
 
 def load_server_telemetry_config(path):
-    config = _read_config(path, {"host", "port", "reliable_ack_sources", "kafka", "tls", "records", "kafka_topics", "logger", "namespace", "redis"})
+    config = _read_config(path, {"host", "port", "reliable_ack_sources", "kafka", "tls", "kafka_topics", "redis"})
     # 이 실험은 Kafka 성공 후 ACK 정책만 지원합니다. 설정을 무시해 조기 ACK하지 않습니다.
     if config.get("reliable_ack_sources") != {"V": "kafka"}:
         raise ValueError('reliable_ack_sources must be {"V": "kafka"}')
@@ -80,33 +80,17 @@ def load_server_telemetry_config(path):
     if (not isinstance(tls, dict) or set(tls) - {"server_cert", "server_key", "ca_file"}
             or any(not isinstance(value, str) or not value for value in tls.values())):
         raise ValueError("tls supports server_cert, server_key and ca_file paths")
-    records = config.setdefault("records", {"V": ["kafka"]})
-    validate_dispatch_rules(records, config["reliable_ack_sources"], SUPPORTED_DISPATCHERS)
     topics = config.setdefault("kafka_topics", dict(DEFAULT_KAFKA_TOPICS))
-    kafka_records = {kind for kind, targets in records.items() if "kafka" in targets}
-    if (not isinstance(topics, dict) or set(topics) - set(DEFAULT_KAFKA_TOPICS)
-            or not kafka_records <= set(topics)
+    if (not isinstance(topics, dict) or set(topics) != set(DEFAULT_KAFKA_TOPICS)
             or any(not isinstance(name, str) or not name for name in topics.values())
             or len(set(topics.values())) != len(topics)):
-        raise ValueError("kafka_topics must map each Kafka record type to a distinct topic")
-    logger = config.setdefault("logger", {"verbose": False})
-    if (not isinstance(logger, dict) or set(logger) - {"verbose"}
-            or type(logger.get("verbose", False)) is not bool):
-        raise ValueError("logger supports verbose=true/false")
-    namespace = config.setdefault("namespace", "telemetry_v2")
-    if not isinstance(namespace, str) or not namespace:
-        raise ValueError("namespace must be a nonempty string")
+        raise ValueError("kafka_topics requires distinct topics for V, connectivity and errors")
     settings = config.setdefault("redis", {
-        "addrs": ["127.0.0.1:6380"], "db": 0, "publish_vin_topics": True,
-        "subscriber_set_prefix": "",
+        "addrs": ["127.0.0.1:6380"], "db": 0,
     })
     if (not isinstance(settings, dict)
-            or set(settings) - {"addrs", "db", "username", "password", "publish_vin_topics",
-                               "subscriber_set_prefix", "tls", "publish_timeout"}):
+            or set(settings) - {"addrs", "db", "username", "password", "tls"}):
         raise ValueError("Unsupported redis settings")
-    publish_timeout = settings.get("publish_timeout", 5_000_000_000)
-    if type(publish_timeout) is not int or publish_timeout <= 0:
-        raise ValueError("redis.publish_timeout must be a positive integer duration in nanoseconds")
     addresses = settings.get("addrs", ["127.0.0.1:6380"])
     if (not isinstance(addresses, list) or len(addresses) != 1
             or not isinstance(addresses[0], str) or not addresses[0]):
@@ -114,10 +98,6 @@ def load_server_telemetry_config(path):
     database = settings.get("db", 0)
     if type(database) is not int or database < 0:
         raise ValueError("redis.db must be a nonnegative integer")
-    publish = settings.get("publish_vin_topics", True)
-    prefix = settings.get("subscriber_set_prefix", "")
-    if type(publish) is not bool or not isinstance(prefix, str) or not (publish or prefix):
-        raise ValueError("Redis requires publish_vin_topics or subscriber_set_prefix")
     for name in ("username", "password"):
         if name in settings and not isinstance(settings[name], str):
             raise ValueError(f"redis.{name} must be a string")

@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from server_kafka_dispatcher import KafkaDispatcher, DeliveryError
-from server_dispatcher import DispatchRouter
+from datastore.kafka.kafka import Producer as KafkaProducer
+from shared_kafka import DeliveryError
 from server_fleet_telemetry import FleetTelemetryServer, poll_kafka
 from vehicle_fleet_telemetry_client import VehicleFleetTelemetryClient, SimulatedFleetTelemetryClients
 from vehicle_sqlite_buffer import VehicleSQLiteBuffer
@@ -64,6 +64,14 @@ class FakeKafka:
         else:
             message["on_delivery"]("test Kafka offline", None)
 
+    @property
+    def vehicle_attempts(self):
+        return [record for record in self.attempts if "record_type" not in record]
+
+    @property
+    def vehicle_delivered(self):
+        return [record for record in self.delivered if "record_type" not in record]
+
     def flush(self, timeout=0):
         if not self.hold:
             while self.queue:
@@ -71,10 +79,10 @@ class FakeKafka:
         return len(self.queue)
 
 
-class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
+class KafkaProducerTests(unittest.IsolatedAsyncioTestCase):
     async def test_publish_waits_for_kafka_success(self):
         kafka = FakeKafka()
-        sink = KafkaDispatcher(producer_factory=kafka.factory)
+        sink = KafkaProducer(producer_factory=kafka.factory)
         task = asyncio.create_task(sink.publish(event()))
         await asyncio.sleep(0)
         self.assertFalse(task.done())
@@ -87,7 +95,7 @@ class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_duplicate_uses_one_native_publish(self):
         kafka = FakeKafka()
-        sink = KafkaDispatcher(producer_factory=kafka.factory)
+        sink = KafkaProducer(producer_factory=kafka.factory)
         tasks = [asyncio.create_task(sink.publish(event())) for _ in range(2)]
         await asyncio.sleep(0)
         self.assertEqual(len(kafka.attempts), 1)
@@ -96,7 +104,7 @@ class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_conflicting_id_rejected(self):
         kafka = FakeKafka()
-        sink = KafkaDispatcher(producer_factory=kafka.factory)
+        sink = KafkaProducer(producer_factory=kafka.factory)
         task = asyncio.create_task(sink.publish(event()))
         await asyncio.sleep(0)
         changed = event()
@@ -111,7 +119,7 @@ class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
             kafka = FakeKafka()
             kafka.queue_full = queue_full
             kafka.online = False
-            sink = KafkaDispatcher(producer_factory=kafka.factory)
+            sink = KafkaProducer(producer_factory=kafka.factory)
             task = asyncio.create_task(sink.publish(event()))
             await asyncio.sleep(0)
             kafka.poll()
@@ -121,7 +129,7 @@ class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_socket_wait_does_not_cancel_kafka_publish(self):
         kafka = FakeKafka()
-        sink = KafkaDispatcher(producer_factory=kafka.factory)
+        sink = KafkaProducer(producer_factory=kafka.factory)
         task = asyncio.create_task(sink.publish(event()))
         await asyncio.sleep(0)
         task.cancel()
@@ -136,7 +144,7 @@ class KafkaDispatcherTests(unittest.IsolatedAsyncioTestCase):
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
             port = reserved.getsockname()[1]
-            sink = KafkaDispatcher(bootstrap_servers=f"127.0.0.1:{port}", message_timeout_ms=1000)
+            sink = KafkaProducer(bootstrap_servers=f"127.0.0.1:{port}", message_timeout_ms=1000)
             stop = asyncio.Event()
             polling = asyncio.create_task(poll_kafka(sink, stop))
             try:
@@ -154,13 +162,11 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="telemetry-ws-test-")
         self.buffer = VehicleSQLiteBuffer(Path(self.directory.name) / "vehicle.db")
         self.kafka = FakeKafka()
-        self.sink = KafkaDispatcher(producer_factory=self.kafka.factory)
-        self.router = DispatchRouter(
-            {"kafka": self.sink}, {"V": ["kafka"]}, {"V": "kafka"},
-        )
+        self.sink = KafkaProducer(producer_factory=self.kafka.factory)
+        self.receiver = FleetTelemetryServer(self.sink)
         self.stop_polling = asyncio.Event()
         self.polling = asyncio.create_task(poll_kafka(self.sink, self.stop_polling))
-        self.server = await serve(FleetTelemetryServer(self.router).handle, "127.0.0.1", 0)
+        self.server = await serve(self.receiver.handle, "127.0.0.1", 0)
         self.url = f"ws://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
         self.clients = []
 
@@ -171,7 +177,7 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(task for _, task in self.clients), return_exceptions=True)
         self.server.close()
         await self.server.wait_closed()
-        await self.router.close()
+        await self.receiver.close(timeout=0.2)
         self.stop_polling.set()
         await self.polling
         self.sink.close()
@@ -194,10 +200,10 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.buffer.save(event())
         self.kafka.hold = True
         sender = self.start_sender()
-        await until(lambda: len(self.kafka.attempts) == 1)
+        await until(lambda: len(self.kafka.vehicle_attempts) == 1)
         await asyncio.sleep(0.1)
         self.assertEqual(len(self.buffer.get_pending()), 1)
-        self.assertEqual(len(self.kafka.attempts), 1)
+        self.assertEqual(len(self.kafka.vehicle_attempts), 1)
         self.kafka.hold = False
         await until(lambda: not self.buffer.get_pending())
         self.assertEqual(sender.delivered_count, 1)
@@ -213,12 +219,12 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.buffer.get_pending()), 6)
         self.kafka.online = True
         await until(lambda: not self.buffer.get_pending())
-        self.assertEqual(self.kafka.delivered[0]["sequence_no"], 6)
-        self.assertCountEqual([e["sequence_no"] for e in self.kafka.delivered], range(1, 7))
+        self.assertEqual(self.kafka.vehicle_delivered[0]["sequence_no"], 6)
+        self.assertCountEqual([e["sequence_no"] for e in self.kafka.vehicle_delivered], range(1, 7))
         from server_telemetry_store import ServerTelemetryStore
         store = ServerTelemetryStore(Path(self.directory.name) / "server.db")
         try:
-            for record in self.kafka.delivered:
+            for record in self.kafka.vehicle_delivered:
                 store.save(record)
             self.assertEqual(store.connection.execute("SELECT COUNT(*) FROM telemetry_history").fetchone()[0], 6)
             latest = dict(store.connection.execute("SELECT signal, value FROM vehicle_latest_state"))
@@ -233,7 +239,7 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.buffer.save(event(3, signals={"speed_mps": 20.0}))
         self.start_sender()
         await until(lambda: not self.buffer.get_pending())
-        self.assertEqual([e["sequence_no"] for e in self.kafka.delivered], [3, 2, 1])
+        self.assertEqual([e["sequence_no"] for e in self.kafka.vehicle_delivered], [3, 2, 1])
 
     async def test_each_vehicle_has_its_own_connection_and_buffer_records(self):
         for car in ("car-1", "car-2"):
@@ -242,17 +248,17 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(SimulatedFleetTelemetryClients(self.buffer, fleet_telemetry_server_url=self.url).run(stop))
         self.clients.append((stop, task))
         await until(lambda: not self.buffer.get_pending())
-        self.assertCountEqual([e["vehicle_id"] for e in self.kafka.delivered], ["car-1", "car-2"])
+        self.assertCountEqual([e["vehicle_id"] for e in self.kafka.vehicle_delivered], ["car-1", "car-2"])
 
     async def test_queue_limit_and_no_duplicate_while_waiting(self):
         for number in range(1, 7):
             self.buffer.save(event(number))
         self.kafka.hold = True
         sender = self.start_sender(max_in_flight=2)
-        await until(lambda: len(self.kafka.attempts) == 2)
+        await until(lambda: len(self.kafka.vehicle_attempts) == 2)
         await asyncio.sleep(0.1)
         self.assertEqual(len(sender.in_flight), 2)
-        self.assertEqual(len(self.kafka.attempts), 2)
+        self.assertEqual(len(self.kafka.vehicle_attempts), 2)
         self.assertEqual(len(self.buffer.get_pending()), 6)
         self.kafka.hold = False
         await until(lambda: not self.buffer.get_pending())
@@ -265,11 +271,11 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         """)
         sender = self.start_sender()
         await until(lambda: bool(sender.pending_acks))
-        self.assertEqual(len(self.kafka.delivered), 1)
+        self.assertEqual(len(self.kafka.vehicle_delivered), 1)
         self.assertEqual(len(self.buffer.get_pending()), 1)
         self.buffer.connection.execute("DROP TRIGGER fail_delete")
         await until(lambda: not self.buffer.get_pending())
-        self.assertEqual(len(self.kafka.attempts), 1)
+        self.assertEqual(len(self.kafka.vehicle_attempts), 1)
 
     async def test_ack_timeout_retains_record_and_replays_original_id(self):
         self.buffer.save(event())
@@ -277,30 +283,30 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         sender = self.start_sender(max_in_flight=1, ack_timeout=0.1)
         await until(lambda: sender.backoff.attempt > 0)
         self.assertEqual(len(self.buffer.get_pending()), 1)
-        self.assertEqual(len(self.kafka.attempts), 1)
+        self.assertEqual(len(self.kafka.vehicle_attempts), 1)
         sender.ack_timeout = 1.0
         self.kafka.hold = False
         await until(lambda: not self.buffer.get_pending())
         # Kafka 성공 직후 재접수되면 중복은 허용됩니다. 모든 전송은 같은 원본 ID입니다.
-        self.assertTrue(self.kafka.delivered)
-        self.assertEqual({e["event_id"] for e in self.kafka.delivered}, {event()["event_id"]})
+        self.assertTrue(self.kafka.vehicle_delivered)
+        self.assertEqual({e["event_id"] for e in self.kafka.vehicle_delivered}, {event()["event_id"]})
 
     async def test_receiver_disconnect_keeps_records_for_reconnect(self):
         self.buffer.save(event())
         self.kafka.hold = True
         sender = self.start_sender()
-        await until(lambda: len(self.kafka.attempts) == 1)
+        await until(lambda: len(self.kafka.vehicle_attempts) == 1)
         self.server.close()
         await self.server.wait_closed()
         await until(lambda: sender.backoff.attempt > 0)
         self.buffer.save(event(2))
         self.buffer.save(event(3))
         self.assertEqual(len(self.buffer.get_pending()), 3)
-        self.server = await serve(FleetTelemetryServer(self.router).handle, "127.0.0.1", 0)
+        self.server = await serve(self.receiver.handle, "127.0.0.1", 0)
         sender.fleet_telemetry_server_url = f"ws://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
         self.kafka.hold = False
         await until(lambda: not self.buffer.get_pending(), timeout=5)
-        self.assertEqual({e["sequence_no"] for e in self.kafka.delivered}, {1, 2, 3})
+        self.assertEqual({e["sequence_no"] for e in self.kafka.vehicle_delivered}, {1, 2, 3})
 
     async def test_history_has_turn_even_when_new_positions_keep_arriving(self):
         self.buffer.save(event(1))
@@ -325,12 +331,12 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
             await client.send(json.dumps({"type": "telemetry", "event": event(vehicle="car-2")}))
             response = json.loads(await client.recv())
             self.assertEqual(response["type"], "error")
-        self.assertEqual(self.kafka.attempts, [])
+        self.assertEqual(self.kafka.vehicle_attempts, [])
 
     async def test_lost_ack_preserves_record_and_retransmits_same_id(self):
         self.server.close()
         await self.server.wait_closed()
-        regular = FleetTelemetryServer(self.router)
+        regular = self.receiver
         ack_lost = asyncio.Event()
         allow_close = asyncio.Event()
         first = True
@@ -357,7 +363,7 @@ class WebSocketPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.buffer.get_pending()), 1)
         allow_close.set()
         await until(lambda: not self.buffer.get_pending())
-        self.assertEqual([e["event_id"] for e in self.kafka.delivered], [event()["event_id"]] * 2)
+        self.assertEqual([e["event_id"] for e in self.kafka.vehicle_delivered], [event()["event_id"]] * 2)
 
 
 if __name__ == "__main__":

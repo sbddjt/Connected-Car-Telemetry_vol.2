@@ -1,8 +1,6 @@
 """Redis 최신 상태만 조회하는 로컬 API와 차량 정보 화면."""
 import argparse
 import json
-import time
-from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -10,7 +8,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from redis.exceptions import RedisError
 
 from server_redis_latest_store import RedisLatestVehicleStore
-from shared_fleet_telemetry_policy import utc_timestamp
 from shared_redis_config import add_redis_arguments, finish_redis_arguments
 from shared_runtime_config import add_env_argument, server_config_argument
 
@@ -31,8 +28,7 @@ def filter_signals(vehicle, selected):
             "observations": {name: value for name, value in vehicle["observations"].items() if name in selected}}
 
 
-def make_query_handler(store, namespace="telemetry_v2", publish_vin_topics=True,
-                       subscriber_set_prefix=""):
+def make_query_handler(store):
     class VehicleQueryHandler(BaseHTTPRequestHandler):
         def _send(self, status, body, content_type="application/json; charset=utf-8"):
             self.send_response(status)
@@ -49,70 +45,6 @@ def make_query_handler(store, namespace="telemetry_v2", publish_vin_topics=True,
         def _json(self, status, value):
             self._send(status, json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
 
-        def _stream(self, query):
-            vehicle_id = query.get("vehicle_id", [""])[0]
-            if len(vehicle_id) > 512:
-                raise ValueError("Invalid vehicle ID")
-            if not publish_vin_topics and not vehicle_id:
-                raise ValueError("Select a vehicle when publish_vin_topics=false")
-            pubsub = store.client.pubsub(ignore_subscribe_messages=True)
-            lease_key = None
-            lease_channel = None
-            headers_sent = False
-            try:
-                if vehicle_id and subscriber_set_prefix:
-                    lease_channel = f"{namespace}_query_{uuid4().hex}"
-                    lease_key = f"{subscriber_set_prefix}_{namespace}_V_{{{vehicle_id}}}"
-                    pubsub.subscribe(lease_channel)
-                    store.client.zadd(lease_key, {lease_channel: int(time.time()) + 30})
-                elif vehicle_id:
-                    pubsub.subscribe(f"{namespace}_V_{{{vehicle_id}}}")
-                else:
-                    pubsub.psubscribe(f"{namespace}_V_*")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                headers_sent = True
-                self.connection.settimeout(10)
-                self.wfile.write(b": connected\n\n")
-                self.wfile.flush()
-                renewed = time.monotonic()
-                while not getattr(self.server, "query_stopping", False):
-                    message = pubsub.get_message(timeout=1.0)
-                    if message is not None and message["type"] in ("message", "pmessage"):
-                        # Pub/Sub JSON is wrapped to stay within a single SSE data line.
-                        record = json.loads(message["data"])
-                        if "event_time" in record:
-                            record["event_time"] = utc_timestamp(record["event_time"])
-                        if "sequence_no" in record:
-                            record["sequence_no"] = str(record["sequence_no"])
-                        payload = json.dumps(record, ensure_ascii=False, allow_nan=False)
-                        self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
-                        self.wfile.flush()
-                    if time.monotonic() - renewed >= 10:
-                        if lease_key:
-                            store.client.zadd(lease_key, {lease_channel: int(time.time()) + 30})
-                        self.wfile.write(b": heartbeat\n\n")
-                        self.wfile.flush()
-                        renewed = time.monotonic()
-            except (RedisError, OSError, ValueError):
-                # 헤더 전 접속 오류는 일반 API 처리로 전달하고, 이미 열린 스트림은 종료합니다.
-                if not headers_sent:
-                    raise
-            finally:
-                try:
-                    pubsub.close()
-                except RedisError:
-                    pass
-                if lease_key:
-                    try:
-                        store.client.zrem(lease_key, lease_channel)
-                    except RedisError:
-                        pass
-                self.close_connection = True
-
         def do_GET(self):
             parsed = urlsplit(self.path)
             if parsed.path in STATIC_FILES:
@@ -126,9 +58,7 @@ def make_query_handler(store, namespace="telemetry_v2", publish_vin_topics=True,
                     selected = set(query["signals"][0].split(","))
                     if not selected or selected - {"location", "speed_mps"}:
                         raise ValueError("signals supports location,speed_mps")
-                if parsed.path == "/api/stream":
-                    self._stream(query)
-                elif parsed.path == "/api/vehicles":
+                if parsed.path == "/api/vehicles":
                     limit = int(query.get("limit", ["50"])[0])
                     offset = int(query.get("offset", ["0"])[0])
                     result = store.list_vehicles(limit, offset)
@@ -179,10 +109,7 @@ def main():
         args.server_redis_url, args.redis_cache_prefix, client_options=args.redis_client_options,
     )
     server = ThreadingHTTPServer(
-        (args.query_api_host, args.query_api_port), make_query_handler(
-            store, args.redis_namespace, args.redis_publish_vin_topics,
-            args.redis_subscriber_set_prefix,
-        ),
+        (args.query_api_host, args.query_api_port), make_query_handler(store),
     )
     try:
         print(f"[차량 조회 화면] http://{args.query_api_host}:{args.query_api_port}")
@@ -190,7 +117,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        server.query_stopping = True
         server.server_close()
         store.close()
 
