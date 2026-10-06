@@ -1,0 +1,120 @@
+name: telemetry-kafka-cluster
+
+x-kafka-environment: &kafka-environment
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+  KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+  KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+
+  KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+  KAFKA_MIN_INSYNC_REPLICAS: "2"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+
+  KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: "2"
+
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+
+services:
+  kafka-volume-init:
+    image: busybox:1.36
+    container_name: kafka-volume-init
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - chown -R 1000:1000 /kafka-1-data /kafka-2-data /kafka-3-data
+    volumes:
+      - kafka-1-data:/kafka-1-data
+      - kafka-2-data:/kafka-2-data
+      - kafka-3-data:/kafka-3-data
+
+  kafka-1:
+    image: apache/kafka:4.3.1
+    hostname: kafka-1
+    container_name: kafka-1
+    depends_on:
+      kafka-volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "29092:9092"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:19092,PLAINTEXT_HOST://localhost:29092"
+    volumes:
+      - kafka-1-data:/tmp/kraft-combined-logs
+
+  kafka-2:
+    image: apache/kafka:4.3.1
+    hostname: kafka-2
+    container_name: kafka-2
+    depends_on:
+      kafka-volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "39092:9092"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:19092,PLAINTEXT_HOST://localhost:39092"
+    volumes:
+      - kafka-2-data:/tmp/kraft-combined-logs
+
+  kafka-3:
+    image: apache/kafka:4.3.1
+    hostname: kafka-3
+    container_name: kafka-3
+    depends_on:
+      kafka-volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "49092:9092"
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "3"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:19092,PLAINTEXT_HOST://localhost:49092"
+    volumes:
+      - kafka-3-data:/tmp/kraft-combined-logs
+
+  kafka-topic-init:
+    image: apache/kafka:4.3.1
+    container_name: kafka-topic-init
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for Kafka brokers..."
+
+        until /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka-1:19092,kafka-2:19092,kafka-3:19092 \
+          --create \
+          --if-not-exists \
+          --topic vehicle-telemetry-v1 \
+          --partitions 12 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2
+        do
+          echo "Kafka is not ready yet. Retrying..."
+          sleep 3
+        done
+
+        echo "Kafka topic initialization completed."
+    restart: "no"
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:

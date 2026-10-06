@@ -1,0 +1,24 @@
+# Local Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local event buffer and runtime output
+data/
+scenario/gangnam/tripinfos.xml
+scenario/gangnam/stats.xml
+scenario/gangnam/edgeData.xml
+scenario/gangnam/osm.passenger.rou.xml
+
+# Packaged duplicate of blog artifacts
+docs/blog/*.zip
+
+# Local secrets and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
