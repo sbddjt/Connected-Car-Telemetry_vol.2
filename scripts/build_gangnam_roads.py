@@ -1,4 +1,5 @@
 """기존 SUMO 강남 도로망을 지도용 GeoJSON으로 내보냅니다. 타일 다운로드는 하지 않습니다."""
+import argparse
 import gzip
 import json
 from pathlib import Path
@@ -9,7 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    network_path = ROOT / "scenario/gangnam/osm.net.xml.gz"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--network", type=Path, default=ROOT / "scenario/gangnam/osm.net.xml.gz")
+    parser.add_argument("--output", type=Path, default=ROOT / "frontend/gangnam_roads.geojson")
+    args = parser.parse_args()
+    network_path = args.network.resolve()
     with gzip.open(network_path, "rb") as source:
         network = ET.parse(source).getroot()
     traci.start(["sumo", "--net-file", str(network_path), "--no-step-log", "true",
@@ -35,7 +40,7 @@ def main():
     finally:
         connection.close()
     payload = {"type": "FeatureCollection", "features": features}
-    target = ROOT / "frontend/gangnam_roads.geojson"
+    target = args.output.resolve()
     target.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print(f"Exported {len(features)} roads to {target}")
 

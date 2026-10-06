@@ -82,6 +82,7 @@ class SignalPolicyTests(unittest.TestCase):
             simulation = SimpleNamespace(
                 getMinExpectedNumber=lambda: int(state["step"] < 3),
                 getTime=lambda: state["step"] * 0.5,
+                getDepartedIDList=lambda: (), getArrivedIDList=lambda: (),
                 convertGeo=lambda x, y: (127.0, 37.0 + state["step"] / 100),
             )
             vehicle = SimpleNamespace(
@@ -90,6 +91,7 @@ class SignalPolicyTests(unittest.TestCase):
             )
             with (
                 patch.object(vehicle_sumo_collector, "PROJECT_ROOT", Path(directory)),
+                patch.object(vehicle_sumo_collector, "PipelineMetrics"),
                 patch.object(vehicle_sumo_collector.traci, "start") as start,
                 patch.object(vehicle_sumo_collector.traci, "simulation", simulation),
                 patch.object(vehicle_sumo_collector.traci, "vehicle", vehicle),

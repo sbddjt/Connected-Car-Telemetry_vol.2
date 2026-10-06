@@ -1149,3 +1149,22 @@ h1 {
     transition-duration:.01ms!important;
   }
 }
+
+/* 5초마다 갱신하는 파이프라인 관측값. 위치의 보간과 별도로 표시합니다. */
+.pipeline-strip { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+.pipeline-strip>div { padding:12px 14px; border:1px solid var(--line); border-radius:9px; background:#fff; min-width:0; }
+.pipeline-strip span { display:block; color:#6f818c; font-size:10px; }
+.pipeline-strip strong { display:block; margin:7px 0 5px; font-size:19px; font-variant-numeric:tabular-nums; }
+.pipeline-strip small { display:block; color:#99a5ae; font-size:9px; }
+.pipeline-strip .unavailable { opacity:.5; }
+.workspace { height:calc(100vh - 393px); }
+@media(max-width:1200px) { .pipeline-strip { grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; } }
+@media(max-width:620px) { .workspace { height:auto; } }
+
+@media(max-width:620px) {
+  .pipeline-strip { grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; }
+  .pipeline-strip>div { padding:10px 8px; }
+  .pipeline-strip span { font-size:8px; min-height:20px; }
+  .pipeline-strip strong { font-size:15px; }
+  .pipeline-strip small { font-size:8px; }
+}

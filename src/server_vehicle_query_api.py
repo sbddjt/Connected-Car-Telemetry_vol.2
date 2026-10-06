@@ -1,5 +1,6 @@
 """Redis 최신 상태만 조회하는 로컬 API와 차량 정보 화면."""
 import argparse
+from shared_pipeline_metrics import read_pipeline_metrics
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -65,7 +66,9 @@ def make_query_handler(store):
                     selected = set(query["signals"][0].split(","))
                     if not selected or selected - {"location", "speed_mps"}:
                         raise ValueError("signals supports location,speed_mps")
-                if parsed.path == "/api/vehicles":
+                if parsed.path == "/api/pipeline":
+                    self._json(200, read_pipeline_metrics())
+                elif parsed.path == "/api/vehicles":
                     limit = int(query.get("limit", ["50"])[0])
                     offset = int(query.get("offset", ["0"])[0])
                     result = store.list_vehicles(limit, offset)

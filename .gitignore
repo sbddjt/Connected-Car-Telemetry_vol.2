@@ -22,3 +22,7 @@ docs/blog/*.zip
 .idea/
 Thumbs.db
 .DS_Store
+
+# Expanded scenario generator intermediates (compressed runtime assets are tracked)
+scenario/gangnam_expanded/*.rou.xml
+scenario/gangnam_expanded/*.trips.xml

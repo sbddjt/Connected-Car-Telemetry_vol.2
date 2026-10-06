@@ -1,0 +1,8 @@
+{
+  "bbox": [127.020, 37.488, 127.058, 37.514],
+  "duration_seconds": 1800,
+  "departure_period_seconds": 0.2,
+  "target_active_vehicles": 300,
+  "seed": 42,
+  "osm_endpoint": "https://overpass-api.de/api/interpreter"
+}

@@ -5,12 +5,14 @@ import json
 import sqlite3
 import ssl
 import time
+from shared_pipeline_metrics import PipelineMetrics
 from pathlib import Path
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from vehicle_sqlite_buffer import VehicleSQLiteBuffer
+from vehicle_sharded_buffer import shard_path
 from shared_fleet_telemetry_policy import (
     Backoff, BUFFER_MESSAGES_PER_VEHICLE, LIVE_WEIGHT, MAX_IN_FLIGHT_PER_VEHICLE, signals_of,
 )
@@ -32,7 +34,7 @@ class VehicleFleetTelemetryClient:
     def __init__(
         self, buffer: VehicleSQLiteBuffer, vehicle_id: str, fleet_telemetry_server_url="ws://127.0.0.1:8765",
         max_in_flight=MAX_IN_FLIGHT_PER_VEHICLE, live_weight=LIVE_WEIGHT,
-        ack_timeout=45.0, retry_seconds=1.0, retry_max_seconds=30.0, tls=None,
+        ack_timeout=45.0, retry_seconds=1.0, retry_max_seconds=30.0, tls=None, defer_local_deletes=False,
     ):
         if max_in_flight < 1 or live_weight < 1 or not 0 < ack_timeout < float("inf"):
             raise ValueError("Require positive finite delivery settings")
@@ -43,6 +45,7 @@ class VehicleFleetTelemetryClient:
         self.live_weight = live_weight
         self.ack_timeout = ack_timeout
         self.tls = tls
+        self.defer_local_deletes = defer_local_deletes
         self.backoff = Backoff(retry_seconds, retry_max_seconds)
         self.in_flight = {}
         self.pending_acks: dict[str, Backoff] = {}
@@ -61,6 +64,8 @@ class VehicleFleetTelemetryClient:
             del self.pending_acks[event_id]
 
     def _retry_local_deletes(self):
+        if self.defer_local_deletes:
+            return
         now = time.monotonic()
         for event_id, retry in list(self.pending_acks.items()):
             if now >= retry.after:
@@ -80,7 +85,8 @@ class VehicleFleetTelemetryClient:
             self.latest_acknowledged[key] = max(row_id, self.latest_acknowledged.get(key, 0))
         self.delivered_count += 1
         self.pending_acks[event_id] = Backoff(self.backoff.initial, self.backoff.maximum)
-        self._delete_acknowledged(event_id)
+        if not self.defer_local_deletes:
+            self._delete_acknowledged(event_id)
 
     async def _enqueue_available(self, socket):
         blocked = set(self.in_flight) | self.pending_acks.keys()
@@ -142,14 +148,18 @@ class VehicleFleetTelemetryClient:
             self.in_flight.clear()
 
     async def run(self, stop: asyncio.Event):
+        idle_since = time.monotonic()
         while not stop.is_set():
             try:
                 self._retry_local_deletes()
                 if not self.buffer.get_pending_records(
                     limit=1, exclude_ids=set(self.pending_acks), vehicle_id=self.vehicle_id,
                 ):
+                    if time.monotonic() - idle_since >= 5 and not self.pending_acks:
+                        return  # 이전 차량의 유휴 작업을 누적시키지 않고 신규 기록 때 다시 생성합니다.
                     await pause(stop, 0.2)
                     continue
+                idle_since = time.monotonic()
                 kwargs = {"proxy": None, "open_timeout": 5, "close_timeout": 1, "max_size": 1_000_000}
                 if self.tls is not None:
                     kwargs["ssl"] = self.tls
@@ -169,10 +179,30 @@ class VehicleFleetTelemetryClient:
 
 class SimulatedFleetTelemetryClients:
     """한 SUMO 실험의 차량들을 차량별 WebSocket 연결로 모방합니다."""
-    def __init__(self, buffer: VehicleSQLiteBuffer, **sender_options):
+    def __init__(self, buffer: VehicleSQLiteBuffer, max_workers=128, **sender_options):
         self.buffer = buffer
         self.sender_options = sender_options
+        self.max_workers = max_workers
         self.workers = {}
+        self.senders = {}
+        self.retired_deliveries = 0
+        self.metrics = PipelineMetrics("vehicle-sender")
+
+    def _flush_acknowledged(self):
+        now=time.monotonic()
+        ready=[(sender,event_id) for sender in self.senders.values()
+               for event_id,retry in sender.pending_acks.items() if now>=retry.after]
+        if not ready:
+            return
+        try:
+            self.buffer.acknowledge_many([event_id for sender,event_id in ready])
+        except sqlite3.Error as error:
+            for sender,event_id in ready:
+                sender.pending_acks[event_id].fail(now)
+            print(f"[버퍼 ACK 삭제 묶음 재시도] {error}")
+        else:
+            for sender,event_id in ready:
+                del sender.pending_acks[event_id]
 
     async def run(self, stop: asyncio.Event):
         try:
@@ -187,10 +217,22 @@ class SimulatedFleetTelemetryClients:
                     if task.done():
                         task.result()  # 프로그래밍 오류를 조용히 무시하지 않습니다.
                         del self.workers[vehicle_id]
+                        self.retired_deliveries += self.senders.pop(vehicle_id).delivered_count
                 for vehicle_id in vehicle_ids:
                     if vehicle_id not in self.workers:
-                        sender = VehicleFleetTelemetryClient(self.buffer, vehicle_id, **self.sender_options)
+                        if len(self.workers) >= self.max_workers:
+                            break
+                        sender = VehicleFleetTelemetryClient(self.buffer, vehicle_id, defer_local_deletes=True, **self.sender_options)
+                        self.senders[vehicle_id] = sender
                         self.workers[vehicle_id] = asyncio.create_task(sender.run(stop))
+                self._flush_acknowledged()
+                if time.monotonic() >= self.metrics.after:
+                    pending = self.buffer.connection.execute("SELECT COUNT(*) FROM events WHERE delivered=0").fetchone()[0]
+                    dropped = self.buffer.connection.execute("SELECT value FROM buffer_stats WHERE name='capacity_dropped'").fetchone()[0]
+                    delivered = self.retired_deliveries + sum(sender.delivered_count for sender in self.senders.values())
+                    self.metrics.publish(delivered, pending_events=pending, capacity_dropped=dropped,
+                                         active_workers=len(self.workers),
+                                         in_flight=sum(len(sender.in_flight) for sender in self.senders.values()))
                 await pause(stop, 0.2)
         finally:
             for task in self.workers.values():
@@ -205,12 +247,14 @@ async def run_sender(args):
             raise ValueError("mTLS requires wss://, --vehicle-tls-ca-file, --vehicle-tls-client-cert and --vehicle-tls-client-key")
         tls = ssl.create_default_context(cafile=args.ca_file)
         tls.load_cert_chain(args.certfile, args.keyfile)
-    buffer = VehicleSQLiteBuffer(args.vehicle_buffer_db, max_events=args.vehicle_buffer_max_messages)
+    buffer_path = (shard_path(args.vehicle_buffer_directory, args.vehicle_buffer_shard_index, args.vehicle_buffer_shards)
+                   if args.vehicle_buffer_directory else args.vehicle_buffer_db)
+    buffer = VehicleSQLiteBuffer(buffer_path, max_events=args.vehicle_buffer_max_messages)
     try:
         buffer.cleanup_completed()
-        print(f"[차량 전송 시작] db={args.vehicle_buffer_db} | server={args.fleet_telemetry_server_url}")
+        print(f"[차량 전송 시작] db={buffer_path} | server={args.fleet_telemetry_server_url}")
         await SimulatedFleetTelemetryClients(
-            buffer, fleet_telemetry_server_url=args.fleet_telemetry_server_url, max_in_flight=args.max_in_flight,
+            buffer, max_workers=args.max_workers, fleet_telemetry_server_url=args.fleet_telemetry_server_url, max_in_flight=args.max_in_flight,
             live_weight=args.live_weight, ack_timeout=args.ack_timeout,
             retry_seconds=args.retry_seconds, retry_max_seconds=args.retry_max_seconds, tls=tls,
         ).run(asyncio.Event())
@@ -245,7 +289,15 @@ def parse_args(argv=None):
                      env="VEHICLE_TLS_CLIENT_CERT_FILE", type=project_path)
     add_env_argument(parser, "--vehicle-tls-client-key", aliases=("--keyfile",), dest="keyfile",
                      env="VEHICLE_TLS_CLIENT_KEY_FILE", type=project_path)
+    add_env_argument(parser, "--vehicle-buffer-directory", env="VEHICLE_SQLITE_BUFFER_DIRECTORY", default=None, type=lambda value: project_path(value) if value else None)
+    add_env_argument(parser, "--vehicle-buffer-shards", env="VEHICLE_BUFFER_SHARDS", default=8, type=int)
+    add_env_argument(parser, "--vehicle-buffer-shard-index", env="VEHICLE_BUFFER_SHARD_INDEX", default=0, type=int)
+    add_env_argument(parser, "--vehicle-sender-max-workers", env="VEHICLE_SENDER_MAX_WORKERS", default=128, type=int, dest="max_workers")
     args = parser.parse_args(argv)
+    if args.max_workers < 1:
+        parser.error("Require positive vehicle-sender-max-workers")
+    if not 1 <= args.vehicle_buffer_shards <= 64 or not 0 <= args.vehicle_buffer_shard_index < args.vehicle_buffer_shards:
+        parser.error("Require valid vehicle buffer shard count and index")
     try:
         load_vehicle_telemetry_config(args.vehicle_telemetry_config)
         Backoff(args.retry_seconds, args.retry_max_seconds)

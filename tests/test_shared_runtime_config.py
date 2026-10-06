@@ -123,6 +123,7 @@ class RuntimeConfigTests(unittest.TestCase):
             simulation = SimpleNamespace(
                 getMinExpectedNumber=lambda: int(state["step"] < 4),
                 getTime=lambda: state["step"] * 0.5,
+                getDepartedIDList=lambda: (), getArrivedIDList=lambda: (),
                 convertGeo=lambda x, y: (127.0, 37.0),
             )
             vehicle = SimpleNamespace(
@@ -135,6 +136,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "VEHICLE_SQLITE_BUFFER_DB_PATH": str(database),
                     "VEHICLE_BUFFER_MAX_MESSAGES": "1",
                 }),
+                patch.object(vehicle_sumo_collector, "PipelineMetrics"),
                 patch.object(vehicle_sumo_collector.traci, "start"),
                 patch.object(vehicle_sumo_collector.traci, "simulation", simulation),
                 patch.object(vehicle_sumo_collector.traci, "vehicle", vehicle),

@@ -2,10 +2,13 @@
 import argparse
 import time
 import math
+from collections import deque
+from shared_pipeline_metrics import PipelineMetrics
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 from vehicle_sqlite_buffer import VehicleSQLiteBuffer
+from vehicle_sharded_buffer import ShardedVehicleSQLiteBuffer
 from shared_fleet_telemetry_policy import BUCKET_SECONDS, BUFFER_MESSAGES_PER_VEHICLE, SignalCollector
 
 from shared_runtime_config import (
@@ -16,7 +19,7 @@ import traci
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SUMO_CONFIG = PROJECT_ROOT / "scenario" / "gangnam" / "osm.sumocfg"
+SUMO_CONFIG = PROJECT_ROOT / "config" / "gangnam_expanded_sumo.sumocfg"
 
 STEP_SECONDS = BUCKET_SECONDS
 
@@ -34,7 +37,11 @@ def parse_args(argv=None):
     add_env_argument(parser, "--sumo-binary", env="VEHICLE_SUMO_BINARY", default="sumo-gui")
     parser.add_argument("--sumo-end-seconds", type=float, default=None,
                         help="검증용 시뮬레이션 종료 시각; 생략하면 전체 시나리오")
+    add_env_argument(parser, "--vehicle-buffer-directory", env="VEHICLE_SQLITE_BUFFER_DIRECTORY", default=None, type=lambda value: project_path(value) if value else None)
+    add_env_argument(parser, "--vehicle-buffer-shards", env="VEHICLE_BUFFER_SHARDS", default=8, type=int)
     args = parser.parse_args(argv)
+    if not 1 <= args.vehicle_buffer_shards <= 64:
+        parser.error("Require 1 <= vehicle-buffer-shards <= 64")
     if args.sumo_end_seconds is not None and (not math.isfinite(args.sumo_end_seconds) or args.sumo_end_seconds <= 0):
         parser.error("Require positive finite --sumo-end-seconds")
     if args.vehicle_buffer_max_messages < 1:
@@ -53,11 +60,14 @@ def main(argv=None) -> None:
     collector = SignalCollector(args.signal_interval_seconds)
 
     # 1. SQLite 버퍼 연결
-    buffer = VehicleSQLiteBuffer(
-        args.vehicle_buffer_db,
-        max_events=args.vehicle_buffer_max_messages, per_vehicle=True,
-    )
+    buffer = (ShardedVehicleSQLiteBuffer(args.vehicle_buffer_directory, args.vehicle_buffer_shards,
+                                         max_events=args.vehicle_buffer_max_messages)
+              if args.vehicle_buffer_directory else VehicleSQLiteBuffer(
+                  args.vehicle_buffer_db, max_events=args.vehicle_buffer_max_messages, per_vehicle=True))
     sumo_started = False
+    metrics = PipelineMetrics("vehicle-collector")
+    total_stored = total_departed = total_arrived = 0
+    step_durations = deque(maxlen=120)
 
     try:
         # Kafka 상태와 관계없이 SUMO 수집을 시작합니다.
@@ -79,9 +89,12 @@ def main(argv=None) -> None:
             traci.simulationStep()
 
             simulation_time = traci.simulation.getTime()
+            total_departed += len(traci.simulation.getDepartedIDList())
+            total_arrived += len(traci.simulation.getArrivedIDList())
             vehicle_ids = traci.vehicle.getIDList()
 
             stored_count = 0
+            batch = []
             for vehicle_id in vehicle_ids:
                 x, y = traci.vehicle.getPosition(vehicle_id)
                 longitude, latitude = traci.simulation.convertGeo(x, y)
@@ -106,10 +119,14 @@ def main(argv=None) -> None:
                     "simulation_time": simulation_time,
                     "signals": selected,
                 }
-                buffer.save(event)
-                collector.committed(vehicle_id, selected, simulation_time)
-                vehicle_sequences[vehicle_id] = sequence_no
-                stored_count += 1
+                batch.append(event)
+
+            # 모든 차량의 선택 기록을 함께 커밋한 뒤 수집 상태를 갱신합니다.
+            buffer.save_many(batch)
+            for event in batch:
+                collector.committed(event["vehicle_id"], event["signals"], simulation_time)
+                vehicle_sequences[event["vehicle_id"]] = event["sequence_no"]
+            stored_count = len(batch)
 
             print(
                 f"time={simulation_time:>6.1f}s | "
@@ -119,11 +136,22 @@ def main(argv=None) -> None:
 
             # 시뮬레이션 속도를 실제 시간과 맞춥니다.
             elapsed = time.monotonic() - step_started_at
+            step_durations.append(elapsed)
+            total_stored += stored_count
+            ordered = sorted(step_durations)
+            metrics.publish(total_stored, run_id=run_id, simulation_time=simulation_time,
+                            active_vehicles=len(vehicle_ids), departed_vehicles=total_departed,
+                            buffer_shards=args.vehicle_buffer_shards if args.vehicle_buffer_directory else 1,
+                            arrived_vehicles=total_arrived, collection_step_seconds=round(elapsed, 3),
+                            collection_step_p95_seconds=round(ordered[int((len(ordered)-1)*.95)], 3))
             time.sleep(max(0, STEP_SECONDS - elapsed))
 
     finally:
         try:
             if sumo_started:
+                metrics.publish(total_stored, force=True, run_id=run_id, active_vehicles=0,
+                                simulation_time=traci.simulation.getTime(), departed_vehicles=total_departed,
+                                arrived_vehicles=total_arrived, stopped=True)
                 traci.close()
         finally:
             buffer.close()

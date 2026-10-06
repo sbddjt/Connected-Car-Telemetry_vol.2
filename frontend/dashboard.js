@@ -133,6 +133,14 @@ async function refresh() {
     const offsets=[]; for(let offset=200;offset<Math.min(total,maximumVehicles);offset+=200) offsets.push(offset);
     const pages=await Promise.all(offsets.map(async offset=>{ const page=await fetch("/api/vehicles?limit=200&offset="+offset,{cache:"no-store"}); if (!page.ok) throw new Error("추가 차량 목록을 조회하지 못했습니다"); return (await page.json()).vehicles; }));
     for(const page of pages) records.push(...page); for(const vehicle of records) applyVehicle(vehicle);
+    if (states.size > maximumVehicles) {
+      const keep = new Set([...states.values()].sort((a,b)=>latestObservationAge(a)-latestObservationAge(b)).slice(0,maximumVehicles).map(vehicle=>vehicle.vehicle_id));
+      if(selectedId && !keep.has(selectedId)) { keep.delete([...keep].pop()); keep.add(selectedId); }
+      for(const id of states.keys()) if(!keep.has(id)) {
+        const marker=markers.get(id); if(map && marker) map.removeLayer(marker);
+        states.delete(id); markers.delete(id); motions.delete(id); trails.delete(id);
+      }
+    }
     if (!selectedId && records.length) selectedId=visibleVehicles()[0]?.vehicle_id??records[0].vehicle_id;
     apiError=false; lastSynced=Date.now(); element("status").className=""; text("status",timeText(lastSynced)+" 갱신"); render();
     if (map && !initialFit && records.some(coordinateOf)) { initialFit=true; fitVehicles(); }
@@ -169,3 +177,30 @@ element("show-trail").addEventListener("change",()=>renderMap(visibleVehicles())
 element("auto-refresh").addEventListener("change",()=>{setConnection(); if(element("auto-refresh").checked) refresh();}); element("refresh").addEventListener("click",refresh);
 function tick() { text("clock",new Date().toLocaleTimeString("ko-KR",{hour12:false})); render(); if(element("auto-refresh").checked && !document.hidden) refresh(); }
 setInterval(tick,refreshInterval); initializeMap(); refresh();
+
+let loadingPipeline=false;
+async function refreshPipeline() {
+  if(loadingPipeline) return;
+  loadingPipeline=true;
+  try {
+    const response=await fetch("/api/pipeline",{cache:"no-store",signal:AbortSignal.timeout(4000)});
+    if(!response.ok) throw new Error("Monitoring unavailable");
+    const {components}=await response.json();
+    const fresh=name=>components[name] && !components[name].stale ? components[name] : null;
+    const collector=fresh("vehicle-collector"), sender=fresh("vehicle-sender"), history=fresh("history-consumer"), redis=fresh("redis-consumer");
+    const set=(id,record,value)=>{text(id,record?value:"—");element(id).parentElement.classList.toggle("unavailable",!record);};
+    set("pipeline-active",collector,collector?.active_vehicles+" 대");
+    set("pipeline-collected",collector,collector?.events_per_second+" 건/s");
+    set("pipeline-acked",sender,sender?.events_per_second+" 건/s");
+    set("pipeline-pending",sender,sender?.pending_events?.toLocaleString()+" 건");
+    text("pipeline-dropped",sender?"용량 초과 삭제 "+sender.capacity_dropped+"건":"확인 대기 기록");
+    for(const [name,record] of [["history",history],["redis",redis]]) {
+      set("pipeline-"+name,record,record?.events_per_second+" 건/s");
+      text("pipeline-"+name+"-delay",record?.retrying?"저장 재시도 중":Number.isFinite(record?.processing_delay_seconds)?"관측 → 처리 "+record.processing_delay_seconds.toFixed(1)+"초":"처리 지연 · 5초 표본");
+    }
+  } catch(error) {
+    for(const id of ["active","collected","acked","pending","history","redis"]) text("pipeline-"+id,"—");
+  } finally {loadingPipeline=false;}
+}
+setInterval(()=>{if(!document.hidden) refreshPipeline();},5000);
+refreshPipeline();

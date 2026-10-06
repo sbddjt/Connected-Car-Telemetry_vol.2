@@ -25,6 +25,14 @@
 <div class="metric"><div><span class="metric-label">이동 중 관측</span><strong id="metric-moving">—</strong><span class="metric-unit">대</span></div><svg><use href="#i-route"/></svg><span class="metric-sub">최근 속도 1 km/h 이상</span></div>
 <div class="metric"><div><span class="metric-label">평균 관측 속도</span><strong id="metric-speed">—</strong><span class="metric-unit">km/h</span></div><span class="metric-orb orange"></span><span class="metric-sub">15초 이내 속도 기준</span></div>
 </section>
+<section class="pipeline-strip" aria-label="파이프라인 처리 상태 · 5초 표본">
+<div><span>동시 운행 · 목표 300대</span><strong id="pipeline-active">—</strong><small>실제 SUMO 운행 대수</small></div>
+<div><span>차량 버퍼 수집</span><strong id="pipeline-collected">—</strong><small>커밋된 기록 / 초</small></div>
+<div><span>Kafka 성공 확인</span><strong id="pipeline-acked">—</strong><small>차량이 받은 ACK / 초</small></div>
+<div><span>차량 미전송 버퍼</span><strong id="pipeline-pending">—</strong><small id="pipeline-dropped">확인 대기 기록</small></div>
+<div><span>MongoDB 이력 저장</span><strong id="pipeline-history">—</strong><small id="pipeline-history-delay">처리 지연 · 5초 표본</small></div>
+<div><span>Redis 최신 상태 갱신</span><strong id="pipeline-redis">—</strong><small id="pipeline-redis-delay">처리 지연 · 5초 표본</small></div>
+</section>
 <div class="workspace">
 <aside class="vehicle-panel" aria-label="차량 목록">
 <div class="panel-heading"><h2>차량 목록</h2><span class="small-count" id="list-count">0</span></div>
@@ -35,7 +43,7 @@
 </aside>
 <section class="map-workspace" aria-label="강남 차량 지도"><div id="map" tabindex="0" aria-label="강남 지도. 차량 마커를 선택하면 상세 정보를 볼 수 있습니다."></div>
 <div class="map-title"><span class="map-title-dot"></span><div><strong>강남 실시간 차량 지도</strong><span id="map-subtitle">마지막 관측 위치를 표시합니다</span></div></div>
-<div class="map-toolbar" aria-label="지도 도구"><button id="fit-vehicles" type="button" title="조회된 차량 전체 보기"><svg><use href="#i-focus"/></svg><span>전체 보기</span></button><button id="center-gangnam" type="button" title="강남 도로 영역으로 이동"><svg><use href="#i-map"/></svg><span>강남</span></button><label class="live-control"><input type="checkbox" id="auto-refresh" checked><span class="status-dot"></span>자동 갱신</label></div>
+<div class="map-toolbar" aria-label="지도 도구"><button id="fit-vehicles" type="button" title="조회된 차량 전체 보기"><svg><use href="#i-focus"/></svg><span>전체 보기</span></button><button id="center-gangnam" type="button" title="강남역·역삼·선릉 도로 영역으로 이동"><svg><use href="#i-map"/></svg><span>강남</span></button><label class="live-control"><input type="checkbox" id="auto-refresh" checked><span class="status-dot"></span>자동 갱신</label></div>
 <div class="map-notice" id="map-notice" role="status" hidden>배경 지도에 연결할 수 없어 보유한 강남 도로망을 표시합니다.</div>
 <article class="detail-panel" aria-label="선택 차량 정보">
 <div class="detail-heading"><span>선택 차량</span><span class="detail-source">LATEST STATE</span></div>

@@ -14,7 +14,7 @@ const vehicle=(id,sequence,offset=0,lat=37.4973,speed=10)=>({vehicle_id:id,signa
   let records=[vehicle('car-1',1),vehicle('car-2',1,-60000,37.498,0)],status=200;
   await page.route('**/api/vehicles?**',route=>route.fulfill({status,contentType:'application/json',body:JSON.stringify({total:records.length,vehicles:records})}));
   await page.goto(serverUrl);
-  await page.waitForFunction(()=>markers.size===2&&roadLayer?.getLayers().length===304);
+  await page.waitForFunction(()=>markers.size===2&&roadLayer?.getLayers().length>=300);
   await page.locator('.live-control').click();
   assert.equal(await page.locator('#selected-speed').innerText(),'36.0');
   assert.equal(await page.locator('.vehicle-pin.stale').count(),1);

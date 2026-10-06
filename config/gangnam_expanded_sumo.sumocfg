@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <input>
+    <net-file value="../scenario/gangnam_expanded/gangnam_expanded.net.xml.gz"/>
+    <route-files value="../scenario/gangnam_expanded/gangnam_expanded.rou.xml.gz"/>
+  </input>
+  <time><begin value="0"/><end value="1800"/></time>
+  <processing>
+    <max-num-vehicles value="300"/>
+    <max-depart-delay value="60"/>
+    <time-to-teleport value="-1"/>
+  </processing>
+  <report><no-step-log value="true"/></report>
+</configuration>

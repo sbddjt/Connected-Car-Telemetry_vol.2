@@ -76,7 +76,7 @@ class RedisStoreTests(unittest.TestCase):
         self.assertIn("car%2Fa%25%20b", self.store.vehicle_key("car/a% b"))
         result=self.store.list_vehicles(limit=1,offset=1)
         self.assertEqual(result["total"],2)
-        self.assertEqual([v["vehicle_id"] for v in result["vehicles"]], ["z"])
+        self.assertEqual([v["vehicle_id"] for v in result["vehicles"]], ["car/a% b"])
         with self.assertRaises(ValueError): self.store.list_vehicles(201)
 
 
@@ -108,6 +108,8 @@ class Consumer:
 
 class RedisProjectionTests(unittest.TestCase):
     def setUp(self):
+        metrics_patch=patch("shared_kafka_storage_worker.PipelineMetrics")
+        metrics_patch.start(); self.addCleanup(metrics_patch.stop)
         self.fake_server=fakeredis.FakeServer()
         self.client=fakeredis.FakeRedis(server=self.fake_server,decode_responses=True)
         self.store=RedisLatestVehicleStore(client=self.client)

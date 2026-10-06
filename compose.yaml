@@ -25,6 +25,19 @@ x-kafka-environment: &kafka-environment
   KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
 
 services:
+  mongodb-history:
+    image: mongo:8.0
+    container_name: telemetry-v2-mongodb
+    ports:
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - mongodb-history-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis-query:
     image: redis:8.2-alpine
     container_name: telemetry-v2-redis
@@ -136,3 +149,4 @@ volumes:
   kafka-2-data:
   kafka-3-data:
   redis-query-data:
+  mongodb-history-data:

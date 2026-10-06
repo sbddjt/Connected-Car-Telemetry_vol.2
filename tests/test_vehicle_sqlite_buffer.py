@@ -40,6 +40,20 @@ class VehicleSQLiteBufferPolicyTests(unittest.TestCase):
             "SELECT value FROM buffer_stats WHERE name = 'capacity_dropped'"
         ).fetchone()[0]
 
+    def test_batch_duplicate_rolls_back_entire_collection_bucket(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.buffer.save_many([{"event_id":"a", "vehicle_id":"car-1"},
+                                   {"event_id":"a", "vehicle_id":"car-2"}])
+        self.assertEqual(self.stored_ids(), [])
+        self.assertEqual(self.dropped(), 0)
+
+    def test_batch_capacity_keeps_newest_per_vehicle_and_counts_drops(self):
+        events=[{"event_id":f"{car}-{i}","vehicle_id":car} for car in ("a","b") for i in range(5)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.buffer.save_many(events)
+        self.assertEqual(self.stored_ids(), ["a-2","a-3","a-4","b-2","b-3","b-4"])
+        self.assertEqual(self.dropped(), 4)
+
     def test_completed_event_removed_before_older_pending(self):
         self.seed()
         # 이전 버전의 완료 행이 남아 있는 DB를 재현합니다.

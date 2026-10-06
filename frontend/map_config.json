@@ -1,5 +1,1 @@
-{
-  "tile_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  "center": [37.4973, 127.0303],
-  "zoom": 16
-}
+{"tile_url":"https://tile.openstreetmap.org/{z}/{x}/{y}.png","center":[37.501,127.04],"zoom":14,"road_count":3256}

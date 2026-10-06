@@ -43,7 +43,7 @@ for signal, encoded in pairs(updates) do
   redis.call('HSET', KEYS[1], signal, encoded)
 end
 redis.call('HSET', KEYS[1], '_vehicle_id', ARGV[1])
-redis.call('ZADD', KEYS[2], 0, ARGV[1])
+redis.call('ZADD', KEYS[2], 'GT', ARGV[3], ARGV[1])
 return count
 """
 
@@ -74,8 +74,22 @@ class RedisLatestVehicleStore:
         }
         return self.update_latest(
             keys=[self.vehicle_key(event["vehicle_id"]), self.index_key],
-            args=[event["vehicle_id"], json.dumps(entries, ensure_ascii=False, allow_nan=False)],
+            args=[event["vehicle_id"], json.dumps(entries, ensure_ascii=False, allow_nan=False),
+                  datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()],
         )
+
+    def save_many(self, events):
+        pipeline = self.client.pipeline(transaction=False)
+        for event in events:
+            validate_event(event)
+            stamp = utc_timestamp(event["event_time"])
+            entries = {signal:{"value":value, "event_time":stamp, "run_id":event["run_id"],
+                       "sequence_no":str(event["sequence_no"]), "event_id":event["event_id"]}
+                       for signal,value in signals_of(event).items()}
+            self.update_latest(keys=[self.vehicle_key(event["vehicle_id"]),self.index_key],
+                               args=[event["vehicle_id"],json.dumps(entries,ensure_ascii=False,allow_nan=False),
+                                     datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()],client=pipeline)
+        pipeline.execute()
 
     @staticmethod
     def _decode_state(fields):
@@ -98,7 +112,7 @@ class RedisLatestVehicleStore:
     def list_vehicles(self, limit=50, offset=0):
         if not 1 <= limit <= 200 or offset < 0:
             raise ValueError("Require 1 <= limit <= 200 and offset >= 0")
-        ids = self.client.zrange(self.index_key, offset, offset + limit - 1)
+        ids = self.client.zrevrange(self.index_key, offset, offset + limit - 1)
         pipeline = self.client.pipeline(transaction=False)
         pipeline.zcard(self.index_key)
         for vehicle_id in ids:

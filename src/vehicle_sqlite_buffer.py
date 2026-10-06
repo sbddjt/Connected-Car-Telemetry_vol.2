@@ -62,66 +62,33 @@ class VehicleSQLiteBuffer:
             """)
 
     def save(self, event: dict) -> None:
-        payload = json.dumps(
-            event,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        self.save_many([event])
 
+    def save_many(self, events) -> None:
+        """같은 수집 묶음은 한 FULL 트랜잭션에 저장합니다. 일부만 성공하지 않습니다."""
+        events = list(events)
+        if not events:
+            return
+        payloads = [(event["event_id"], json.dumps(event, ensure_ascii=False,
+                    separators=(",", ":"), allow_nan=False)) for event in events]
         dropped = 0
-
-        # 신규 저장, 기존 데이터 정리, 드롭 집계를 함께 커밋합니다.
         with self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO events (event_id, payload)
-                VALUES (?, ?)
-                """,
-                (event["event_id"], payload),
-            )
-
-            scope = "json_extract(payload, '$.vehicle_id') = ?" if self.per_vehicle else "1 = 1"
-            scope_args = (event["vehicle_id"],) if self.per_vehicle else ()
-            count = self.connection.execute(
-                f"SELECT COUNT(*) FROM events WHERE {scope}", scope_args
-            ).fetchone()[0]
-            overflow = count - self.max_events
-
-            if overflow > 0:
-                # 완료 데이터를 먼저, 같은 상태에서는 저장된 순서로 정리합니다.
-                victims = self.connection.execute(
-                    f"""
-                    SELECT id, delivered
-                    FROM events WHERE {scope}
-                    ORDER BY delivered DESC, id ASC
-                    LIMIT ?
-                    """,
-                    (*scope_args, overflow),
-                ).fetchall()
-
-                # 완료 데이터 정리는 드롭으로 집계하지 않습니다.
-                dropped = sum(
-                    delivered == 0
-                    for _, delivered in victims
-                )
-
-                self.connection.executemany(
-                    "DELETE FROM events WHERE id = ?",
-                    [(row_id,) for row_id, _ in victims],
-                )
-
-                if dropped:
-                    self.connection.execute(
-                        """
-                        UPDATE buffer_stats
-                        SET value = value + ?
-                        WHERE name = 'capacity_dropped'
-                        """,
-                        (dropped,),
-                    )
-
-        # 커밋 성공 후에만 드롭 사실을 출력합니다.
+            self.connection.executemany(
+                "INSERT INTO events (event_id, payload) VALUES (?, ?)", payloads)
+            vehicles = {event["vehicle_id"] for event in events} if self.per_vehicle else {None}
+            for vehicle_id in vehicles:
+                scope = "json_extract(payload, '$.vehicle_id') = ?" if self.per_vehicle else "1 = 1"
+                args = (vehicle_id,) if self.per_vehicle else ()
+                count = self.connection.execute(f"SELECT COUNT(*) FROM events WHERE {scope}", args).fetchone()[0]
+                overflow = count-self.max_events
+                if overflow > 0:
+                    victims = self.connection.execute(
+                        f"SELECT id, delivered FROM events WHERE {scope} ORDER BY delivered DESC, id ASC LIMIT ?",
+                        (*args, overflow)).fetchall()
+                    dropped += sum(delivered == 0 for _, delivered in victims)
+                    self.connection.executemany("DELETE FROM events WHERE id = ?", [(row_id,) for row_id, _ in victims])
+            if dropped:
+                self.connection.execute("UPDATE buffer_stats SET value=value+? WHERE name='capacity_dropped'", (dropped,))
         if dropped:
             print(f"[버퍼 용량 초과] 미전송 이벤트 {dropped}건 삭제")
 
@@ -210,6 +177,11 @@ class VehicleSQLiteBuffer:
                 "DELETE FROM events WHERE event_id = ?",
                 (event_id,),
             )
+
+    def acknowledge_many(self, event_ids):
+        """Kafka ACK가 확인된 ID들만 한 트랜잭션에서 삭제합니다."""
+        with self.connection:
+            self.connection.executemany("DELETE FROM events WHERE event_id = ?",[(event_id,) for event_id in event_ids])
 
     def cleanup_completed(self) -> None:
         """이전 버전이 전송 완료로 표시한 데이터를 정리합니다."""
