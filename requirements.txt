@@ -1,2 +1,4 @@
 confluent-kafka==2.15.0
 traci==1.27.1
+websockets==17.1
+redis==8.1.0

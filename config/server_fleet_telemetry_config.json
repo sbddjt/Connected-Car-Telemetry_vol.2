@@ -1,0 +1,46 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "reliable_ack_sources": {
+    "V": "kafka"
+  },
+  "kafka": {
+    "bootstrap.servers": "localhost:29092,localhost:39092,localhost:49092",
+    "message.timeout.ms": 30000
+  },
+  "records": {
+    "V": [
+      "kafka",
+      "logger",
+      "redis"
+    ],
+    "connectivity": [
+      "kafka",
+      "logger",
+      "redis"
+    ],
+    "errors": [
+      "kafka",
+      "logger",
+      "redis"
+    ]
+  },
+  "kafka_topics": {
+    "V": "vehicle-telemetry-v1",
+    "connectivity": "vehicle-connectivity-v1",
+    "errors": "vehicle-errors-v1"
+  },
+  "logger": {
+    "verbose": false
+  },
+  "namespace": "telemetry_v2",
+  "redis": {
+    "addrs": [
+      "127.0.0.1:6380"
+    ],
+    "db": 0,
+    "publish_vin_topics": true,
+    "subscriber_set_prefix": "",
+    "publish_timeout": 5000000000
+  }
+}

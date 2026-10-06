@@ -1,0 +1,7 @@
+{
+  "delivery_policy": "latest",
+  "fields": {
+    "Location": {"interval_seconds": 1},
+    "VehicleSpeed": {"interval_seconds": 1}
+  }
+}

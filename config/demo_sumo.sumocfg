@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <input>
+    <net-file value="../scenario/gangnam/osm.net.xml.gz"/>
+    <route-files value="../scenario/gangnam/osm.passenger.trips.xml"/>
+  </input>
+  <processing><ignore-route-errors value="true"/></processing>
+</configuration>
