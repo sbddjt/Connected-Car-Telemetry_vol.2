@@ -186,6 +186,24 @@ class RedisQueryAPITests(unittest.TestCase):
         result=json.loads(body); self.assertEqual(set(result["vehicles"][0]["signals"]),{"speed_mps"})
         self.assertEqual(self.request("/vehicle_state.js")[0],200)
 
+    def test_map_assets_and_tile_security_policy(self):
+        code, _, headers = self.request("/")
+        self.assertEqual(code, 200)
+        self.assertIn("img-src 'self' data: https://tile.openstreetmap.org", headers["Content-Security-Policy"])
+        self.assertEqual(headers["Referrer-Policy"], "strict-origin-when-cross-origin")
+        for path in ("/map_motion.js", "/map_config.json", "/vendor/leaflet/leaflet.js", "/vendor/leaflet/leaflet.css"):
+            self.assertEqual(self.request(path)[0], 200, path)
+        code, body, _ = self.request("/gangnam_roads.geojson")
+        self.assertEqual(code, 200)
+        roads = json.loads(body)
+        self.assertGreater(len(roads["features"]), 100)
+        for road in roads["features"]:
+            self.assertEqual(road["geometry"]["type"], "LineString")
+            for longitude, latitude in road["geometry"]["coordinates"]:
+                self.assertTrue(126.9 < longitude < 127.2)
+                self.assertTrue(37.4 < latitude < 37.6)
+        self.assertEqual(self.request("/vendor/leaflet/../../.env")[0], 404)
+
     def test_lookup_encoded_id_and_validation_errors(self):
         self.store.save(event(vehicle="a/b% c"))
         self.assertEqual(self.request("/api/vehicles/a%2Fb%25%20c")[0],200)

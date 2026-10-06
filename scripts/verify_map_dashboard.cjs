@@ -1,0 +1,70 @@
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.SERVER_MAP_QA_PLAYWRIGHT_MODULE_PATH || 'playwright');
+// Run against an already running local pipeline. Tile requests are blocked to avoid automated tile downloads.
+const serverUrl=process.env.SERVER_QUERY_API_TEST_URL || 'http://127.0.0.1:8092/';
+let now;
+const vehicle=(id,sequence,offset=0,lat=37.4973,speed=10)=>({vehicle_id:id,signals:{location:{latitude:lat,longitude:127.0303},speed_mps:speed},observations:{location:{run_id:'map-qa',sequence_no:String(sequence),event_time:new Date(now+offset).toISOString(),value:{latitude:lat,longitude:127.0303}},speed_mps:{run_id:'map-qa',sequence_no:String(sequence),event_time:new Date(now+offset).toISOString(),value:speed}}});
+(async()=>{
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'no-preference'});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.route('https://tile.openstreetmap.org/**',route=>route.abort());
+  now=Date.now();
+  let records=[vehicle('car-1',1),vehicle('car-2',1,-60000,37.498,0)],status=200;
+  await page.route('**/api/vehicles?**',route=>route.fulfill({status,contentType:'application/json',body:JSON.stringify({total:records.length,vehicles:records})}));
+  await page.goto(serverUrl);
+  await page.waitForFunction(()=>markers.size===2&&roadLayer?.getLayers().length===304);
+  await page.locator('.live-control').click();
+  assert.equal(await page.locator('#selected-speed').innerText(),'36.0');
+  assert.equal(await page.locator('.vehicle-pin.stale').count(),1);
+  await page.locator('[data-scope="recent"]').click();assert.equal(await page.locator('.vehicle-row').count(),1);
+  await page.locator('[data-scope="all"]').click();
+  await page.locator('#vehicle-id').fill('car-2');assert.equal(await page.locator('.vehicle-row').count(),1);
+  await page.locator('.vehicle-row').click();assert.equal(await page.locator('#selected-id').innerText(),'car-2');
+  await page.locator('#vehicle-id').fill('');
+  await page.locator('[data-vehicle-id="car-1"]').click();
+  records=[vehicle('car-1',2,1000,37.4974,12),records[1]];
+  await page.evaluate(()=>refresh());
+  await page.waitForFunction(()=>Math.abs(markers.get("car-1").getLatLng().lat-37.4974)<1e-9,{},{timeout:5000});
+  assert.equal(await page.locator('#selected-speed').innerText(),'43.2');
+  assert.ok(Math.abs(await page.evaluate(()=>markers.get('car-1').getLatLng().lat)-37.4974)<1e-9);
+  assert.equal(await page.evaluate(()=>trails.get('car-1').length),2);
+  const saved=await page.evaluate(()=>markers.get('car-1').getLatLng().lat);
+  records=[vehicle('car-1',0,-30000,37.49,1),records[1]];
+  await page.evaluate(()=>refresh());await page.waitForTimeout(850);
+  assert.equal(await page.evaluate(()=>markers.get('car-1').getLatLng().lat),saved);
+  assert.equal(await page.locator('#selected-speed').innerText(),'43.2');
+  status=503;await page.evaluate(()=>refresh());
+  assert.ok((await page.locator('#connection').getAttribute('class')).includes('error'));
+  assert.equal(await page.evaluate(()=>markers.size),2);
+  status=200;records=[vehicle('car-1',3,11000,37.5,20),records[1]];
+  await page.evaluate(()=>refresh());
+  assert.equal(await page.evaluate(()=>motions.size),0);
+  assert.equal(await page.evaluate(()=>trails.get('car-1').length),1);
+  assert.ok(!(await page.locator('#connection').getAttribute('class')).includes('error'));
+  await page.locator('#vehicle-id').fill('missing');await page.locator('#search-form button').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('해당 차량'));
+  assert.equal(await page.locator('.vehicle-pin').count(),0);
+  await page.locator('#vehicle-id').fill('');
+  await page.locator('#follow-vehicle').check();
+  await page.locator('#center-gangnam').click();assert.equal(await page.locator('#follow-vehicle').isChecked(),false);
+  assert.equal(errors.length,0,JSON.stringify(errors));
+  for(const width of [1024,768,390]) {
+   await page.setViewportSize({width,height:900});await page.waitForTimeout(100);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'overflow '+width);
+   const overlap=await page.evaluate(()=>{const a=document.querySelector('.map-title').getBoundingClientRect(),b=document.querySelector('.map-toolbar').getBoundingClientRect();return a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top;});
+   assert.equal(overlap,false,'map toolbar overlap '+width);
+  }
+  console.log('Browser functional checks: selection, search, recent filter, km/h, motion, late records, outage/recovery, trail reset, responsive layout passed');
+  const live=await browser.newPage({viewport:{width:1440,height:1000}});
+  await live.route('https://tile.openstreetmap.org/**',route=>route.abort());
+  await live.goto(serverUrl);await live.waitForSelector('.vehicle-row');
+  const first=await live.evaluate(()=>[...states.values()].map(v=>[v.vehicle_id,JSON.stringify(v.signals.location)]));
+  await live.waitForTimeout(2600);
+  const second=await live.evaluate(()=>[...states.values()].map(v=>[v.vehicle_id,JSON.stringify(v.signals.location)]));
+  const before=new Map(first),changed=second.filter(([id,location])=>before.has(id)&&before.get(id)!==location).length;
+  assert.ok(changed>0,'actual SUMO locations must update');
+  console.log('Actual SUMO -> Kafka -> Redis -> map: '+changed+' vehicles moved');
+ } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

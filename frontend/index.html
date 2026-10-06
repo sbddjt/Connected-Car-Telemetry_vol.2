@@ -1,40 +1,52 @@
 <!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>차량 최신 정보 · Telemetry v2</title>
-  <link rel="stylesheet" href="/dashboard.css">
-  <script src="/vehicle_state.js" defer></script>
-<script src="/dashboard.js" defer></script>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light">
+<title>강남 차량 관제 · Fleet Monitor</title>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css"><link rel="stylesheet" href="/dashboard.css">
+<script src="/vendor/leaflet/leaflet.js" defer></script><script src="/vehicle_state.js" defer></script><script src="/map_motion.js" defer></script><script src="/dashboard.js" defer></script>
 </head>
 <body>
-  <main>
-    <header><div><p class="eyebrow">CONNECTED CAR · VOL.2</p><h1>차량 최신 정보</h1>
-      <p class="subtitle">마지막으로 관측된 위치와 속도를 확인합니다.</p></div>
-      <span class="source">Redis 최신 상태 · 1초 조회</span></header>
-    <section class="toolbar" aria-label="조회 설정">
-      <form id="search-form"><label for="vehicle-id">차량 ID</label>
-        <div class="search"><input id="vehicle-id" placeholder="차량 ID로 조회" autocomplete="off">
-          <button type="submit">조회</button><button id="show-all" type="button" class="secondary">전체</button></div>
-      </form>
-      <fieldset><legend>표시할 정보</legend>
-        <label><input id="show-location" type="checkbox" checked> 위치</label>
-        <label><input id="show-speed" type="checkbox" checked> 속도</label>
-      </fieldset>
-      <label class="auto"><input id="auto-refresh" type="checkbox" checked> 최신 상태 주기 조회</label>
-    </section>
-    <div class="summary"><span id="count">차량 조회 중</span><span id="status" role="status" aria-live="polite">연결 확인 중…</span></div>
-    <section class="panel" aria-label="차량 정보">
-      <div class="table-wrap"><table><thead><tr>
-        <th>차량 ID</th><th id="location-heading">위치 · 위도 / 경도</th>
-        <th id="speed-heading">속도 · km/h</th><th>최근 관측</th>
-      </tr></thead><tbody id="vehicles"></tbody></table></div>
-      <p id="empty" hidden>아직 조회할 차량이 없습니다. 데이터 수집과 최신 상태 갱신 작업을 실행해 주세요.</p>
-      <div class="pagination"><button id="previous" class="secondary" type="button">이전</button>
-        <span id="page">1페이지</span><button id="next" class="secondary" type="button">다음</button></div>
-    </section>
-    <p class="note">위치와 속도의 관측 시각은 다를 수 있습니다. 오래된 관측은 연결 종료를 뜻하지 않으며, 값이 바뀌지 않은 차량도 오래된 시각으로 표시될 수 있습니다.</p>
-  </main>
-</body>
-</html>
+<svg class="svg-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-map" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3Zm6-3v15m6-12v15"/></symbol>
+<symbol id="i-car" viewBox="0 0 24 24"><path d="m5 9 2-5h10l2 5m-15 0h16v9H4Zm2 9v2m12-2v2M7 13h2m6 0h2"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+<symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></symbol>
+<symbol id="i-route" viewBox="0 0 24 24"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M5 7v5h14v5"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="m8 5 7 7-7 7"/></symbol>
+</defs></svg>
+<div class="app-shell">
+<aside class="navigation" aria-label="주 메뉴"><a class="brand" href="/" aria-label="Fleet Monitor 홈"><svg><use href="#i-car"/></svg></a><div class="nav-divider"></div><a class="nav-item active" href="#map" aria-label="차량 관제 지도"><svg><use href="#i-map"/></svg></a><span class="nav-caption">LIVE</span><div class="nav-bottom"><span class="nav-version">V2</span><span class="nav-dot"></span></div></aside>
+<main>
+<header class="topbar"><div><p class="eyebrow">FLEET MONITOR / SEOUL</p><h1>강남 차량 관제 <span class="region-tag">GANGNAM</span></h1></div><div class="header-actions"><span class="source-badge">SUMO 시뮬레이션</span><span class="sync-badge" id="connection"><span class="status-dot"></span><span id="connection-label">연결 확인 중</span></span><span class="header-clock" id="clock">—</span></div></header>
+<section class="metrics" aria-label="관측 요약">
+<div class="metric"><div><span class="metric-label">조회된 차량</span><strong id="metric-total">—</strong><span class="metric-unit">대</span></div><svg><use href="#i-car"/></svg><span class="metric-sub" id="loaded-count">최신 상태 조회 중</span></div>
+<div class="metric"><div><span class="metric-label">최근 관측</span><strong id="metric-recent">—</strong><span class="metric-unit">대</span></div><span class="metric-orb green"></span><span class="metric-sub">15초 이내 신호 기준</span></div>
+<div class="metric"><div><span class="metric-label">이동 중 관측</span><strong id="metric-moving">—</strong><span class="metric-unit">대</span></div><svg><use href="#i-route"/></svg><span class="metric-sub">최근 속도 1 km/h 이상</span></div>
+<div class="metric"><div><span class="metric-label">평균 관측 속도</span><strong id="metric-speed">—</strong><span class="metric-unit">km/h</span></div><span class="metric-orb orange"></span><span class="metric-sub">15초 이내 속도 기준</span></div>
+</section>
+<div class="workspace">
+<aside class="vehicle-panel" aria-label="차량 목록">
+<div class="panel-heading"><h2>차량 목록</h2><span class="small-count" id="list-count">0</span></div>
+<form id="search-form" class="search"><svg><use href="#i-search"/></svg><input id="vehicle-id" type="search" placeholder="차량 ID 검색" aria-label="차량 ID 검색" autocomplete="off"><button type="submit" aria-label="차량 조회"><svg><use href="#i-arrow"/></svg></button></form>
+<div class="list-tabs" role="group" aria-label="관측 필터"><button class="active" data-scope="all" type="button">전체 차량</button><button data-scope="recent" type="button">최근 관측</button></div>
+<div class="list-label"><span>차량 · 관측 상태</span><span>속도</span></div><div id="vehicle-list" class="vehicle-list"></div><p class="empty-list" id="empty" hidden>조건에 맞는 차량이 없습니다.</p>
+<div class="panel-footer"><span class="status-dot"></span><span id="status" role="status" aria-live="polite">차량 최신 정보 조회 중…</span><button type="button" id="refresh" title="지금 갱신" aria-label="지금 갱신">↻</button></div>
+</aside>
+<section class="map-workspace" aria-label="강남 차량 지도"><div id="map" tabindex="0" aria-label="강남 지도. 차량 마커를 선택하면 상세 정보를 볼 수 있습니다."></div>
+<div class="map-title"><span class="map-title-dot"></span><div><strong>강남 실시간 차량 지도</strong><span id="map-subtitle">마지막 관측 위치를 표시합니다</span></div></div>
+<div class="map-toolbar" aria-label="지도 도구"><button id="fit-vehicles" type="button" title="조회된 차량 전체 보기"><svg><use href="#i-focus"/></svg><span>전체 보기</span></button><button id="center-gangnam" type="button" title="강남 도로 영역으로 이동"><svg><use href="#i-map"/></svg><span>강남</span></button><label class="live-control"><input type="checkbox" id="auto-refresh" checked><span class="status-dot"></span>자동 갱신</label></div>
+<div class="map-notice" id="map-notice" role="status" hidden>배경 지도에 연결할 수 없어 보유한 강남 도로망을 표시합니다.</div>
+<article class="detail-panel" aria-label="선택 차량 정보">
+<div class="detail-heading"><span>선택 차량</span><span class="detail-source">LATEST STATE</span></div>
+<div class="selected-title"><div class="selected-icon"><svg><use href="#i-car"/></svg></div><div><h2 id="selected-id">차량을 선택하세요</h2><span class="vehicle-status" id="selected-status">지도 또는 목록에서 선택</span></div></div>
+<div class="speed-display"><span>관측 속도</span><div><strong id="selected-speed">—</strong><span>km/h</span></div><div class="speed-meter"><span id="speed-meter"></span></div><small id="speed-time">속도 관측 대기</small></div>
+<dl class="detail-values"><div><dt>위도</dt><dd id="selected-latitude">—</dd></div><div><dt>경도</dt><dd id="selected-longitude">—</dd></div><div><dt>위치 관측</dt><dd id="location-time">—</dd></div><div><dt>마지막 신호</dt><dd id="selected-age">—</dd></div></dl>
+<label class="follow-control"><input type="checkbox" id="follow-vehicle"><svg><use href="#i-focus"/></svg><span>선택 차량 따라가기</span></label>
+<label class="trail-control"><input type="checkbox" id="show-trail" checked><svg><use href="#i-route"/></svg><span>화면에서 관측한 이동 궤적</span></label>
+<p class="detail-note">표시 시각은 신호 관측 기준입니다. 오래된 관측이 통신 단절을 뜻하지는 않습니다.</p>
+</article>
+<div class="map-legend"><span><i class="legend-dot green"></i>최근 관측</span><span><i class="legend-dot gray"></i>마지막 위치</span><span class="legend-separator"></span><span>좌표 사이 움직임 보간</span></div>
+</section></div>
+<footer class="app-footer"><span><span class="footer-dot"></span>차량 데이터 · Kafka → Redis 최신 상태</span><span>1초 주기 조회 · 위치 / 속도 관측 시각은 다를 수 있습니다</span></footer>
+</main></div></body></html>

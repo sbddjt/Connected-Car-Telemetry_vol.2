@@ -17,6 +17,11 @@ STATIC_FILES = {
     "/vehicle_state.js": ("vehicle_state.js", "text/javascript; charset=utf-8"),
     "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
     "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+    "/map_motion.js": ("map_motion.js", "text/javascript; charset=utf-8"),
+    "/map_config.json": ("map_config.json", "application/json; charset=utf-8"),
+    "/gangnam_roads.geojson": ("gangnam_roads.geojson", "application/geo+json; charset=utf-8"),
+    "/vendor/leaflet/leaflet.js": ("vendor/leaflet/leaflet.js", "text/javascript; charset=utf-8"),
+    "/vendor/leaflet/leaflet.css": ("vendor/leaflet/leaflet.css", "text/css; charset=utf-8"),
 }
 
 
@@ -36,9 +41,11 @@ def make_query_handler(store):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
             self.send_header("Content-Security-Policy",
                              "default-src 'self'; script-src 'self'; style-src 'self'; "
-                             "connect-src 'self'; object-src 'none'; base-uri 'none'")
+                             "connect-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; "
+                             "object-src 'none'; base-uri 'none'")
             self.end_headers()
             self.wfile.write(body)
 

@@ -13,7 +13,7 @@ SUMO → 차량 SQLite → 차량별 WebSocket → 수신 서버 → Kafka Produ
                                                                                            ↓
                                                                                        조회 API
                                                                                            ↓
-                                                                               차량 정보 화면 (1초 조회)
+                                                                               강남 차량 관제 지도 (1초 조회)
 ```
 
 수신 서버는 Kafka 한 곳으로만 보냅니다. 별도 Dispatcher와 Redis/Logger Producer는 제거했습니다. 두 Consumer는 서로 다른 그룹으로 동일한 차량 토픽을 읽습니다. 이력 DB는 수신 기록을 보관하고, Redis는 화면 조회에 필요한 차량별 최신 위치·속도를 보관합니다. Redis 서버는 한 개이며, 화면은 조회 API를 통해 캐시를 읽습니다. Redis Pub/Sub와 SSE 경로는 사용하지 않습니다.
@@ -58,13 +58,13 @@ docker compose up -d
 docker compose logs -f kafka-topic-init
 ```
 
-Windows에서 시연용 버퍼를 새로 사용해 서버·Consumer·화면·8초 SUMO를 함께 실행할 수 있습니다. 아래 구성은 기존 `data/event_buffer.db`를 소비하지 않습니다.
+Windows에서 시연용 버퍼를 사용해 서버·Consumer·지도·30분 SUMO를 함께 실행할 수 있습니다. 아래 구성은 기존 `data/event_buffer.db`를 소비하지 않습니다.
 
 ```powershell
-.\scripts\start_local_pipeline.ps1 -QueryApiPort 8092 -VehicleBufferDbPath data/runtime/demo_vehicle_buffer.db -SumoConfigPath config/demo_sumo.sumocfg -StartSumo -SumoEndSeconds 8
+.\scripts\start_local_pipeline.ps1 -QueryApiPort 8092 -VehicleBufferDbPath data/runtime/demo_vehicle_buffer.db -SumoConfigPath config/demo_sumo.sumocfg -StartSumo -SumoEndSeconds 1800
 ```
 
-화면은 `http://127.0.0.1:8092/`, 프로세스 PID와 로그는 `data/runtime/`입니다. SUMO는 8초에 종료되고 서버·Consumer·조회 화면은 계속 실행됩니다. 시뮬레이션 종료 후에는 마지막 관측값이 표시됩니다. `-VehicleBufferDbPath`를 생략하면 기존 차량 버퍼를 사용하며 Kafka ACK된 기록을 삭제하는 정상 정책이 적용됩니다. `-StartSumo`를 생략하면 수집기를 따로 실행할 수 있습니다. 이미 관리 중인 프로세스가 있으면 중복 실행을 거부합니다.
+화면은 `http://127.0.0.1:8092/`, 프로세스 PID와 로그는 `data/runtime/`입니다. SUMO는 1,800초에 종료되고 서버·Consumer·조회 화면은 계속 실행됩니다. 시뮬레이션 종료 후에는 마지막 관측값이 표시됩니다. `-VehicleBufferDbPath`를 생략하면 기존 차량 버퍼를 사용하며 Kafka ACK된 기록을 삭제하는 정상 정책이 적용됩니다. `-StartSumo`를 생략하면 수집기를 따로 실행할 수 있습니다. 이미 관리 중인 프로세스가 있으면 중복 실행을 거부합니다.
 
 ```powershell
 # 이 스크립트가 띄운 Python 프로세스만 종료; Docker 볼륨은 유지
@@ -118,7 +118,7 @@ src/
     record.py                        # Tesla Record: vin·tx_type·txid·data
   datastore/
     kafka/kafka.py                   # Producer: Kafka 적재·최종 결과 콜백
-frontend/                            # 로컬 차량 목록·검색·위치/속도·1초 주기 조회 화면
+frontend/                            # Leaflet 강남 지도·차량 목록·관측 정보·1초 조회 화면
 config/
   vehicle_fleet_telemetry_config.json # 차량: fields·interval_seconds·delivery_policy
   server_fleet_telemetry_config.json  # 서버: Kafka ACK 기준·토픽·조회 Redis 접속 설정
@@ -128,7 +128,7 @@ data/
   server_telemetry.db    # 서버 이력 및 최신 상태 (별도 파일)
 ```
 
-두 DB는 실행 시 자동 생성합니다. 실제 차량마다 별도의 버퍼가 있는 것을 모방해, 실험에서는 한 SQLite 파일의 차량 ID별로 5,000개 한도를 적용합니다. 따라서 전체 실험 DB가 5,000개로 제한되는 것은 아닙니다.
+차량 버퍼 SQLite는 임베디드 저장소 역할이며, 서버 이력 SQLite는 실험용 저장소입니다. 서버 이력은 나중에 별도 DB로 교체할 수 있고, Redis는 화면 조회용 최신 상태를 계속 담당합니다. 두 DB는 실행 시 자동 생성합니다. 실제 차량마다 별도의 버퍼가 있는 것을 모방해, 실험에서는 한 SQLite 파일의 차량 ID별로 5,000개 한도를 적용합니다. 따라서 전체 실험 DB가 5,000개로 제한되는 것은 아닙니다.
 
 ### Tesla 공개 이름과 역할별 설정
 
@@ -273,9 +273,15 @@ Redis 저장 **후** Kafka 오프셋을 동기로 커밋합니다. Redis 장애 
 
 ## Redis 조회 API와 차량 화면
 
-브라우저는 Redis에 직접 연결하지 않고 조회 API를 사용합니다. 첫 화면·검색·페이지 전환에서 조회하고, 자동 갱신을 켜면 기본 1초마다 조회합니다. Redis Pub/Sub, SSE, `/api/stream`은 제거했습니다. 따라서 화면은 Kafka에 적재된 후 조회 Consumer가 캐시에 반영한 상태를 보여줍니다.
+브라우저는 Redis에 직접 연결하지 않고 조회 API를 사용합니다. 첫 화면과 검색에서 조회하고, 자동 갱신을 켜면 기본 1초마다 조회합니다. 목록 API를 200개씩 읽어 최대 1,000대를 화면에 적재하며, 전체 수와 표시 수를 구분합니다. Redis Pub/Sub, SSE, `/api/stream`은 제거했습니다. 따라서 화면은 Kafka에 적재된 후 조회 Consumer가 캐시에 반영한 상태를 보여줍니다.
 
-위치·속도를 선택해서 볼 수 있고 m/s 속도는 화면에서 km/h로 표시합니다. 화면도 신호별 관측 시각을 비교해 오래된 응답으로 최신 값이 덮이지 않게 합니다. 최근 관측 시간은 차량의 연결 상태를 뜻하지 않습니다. 현재 화면은 차량 목록·좌표·속도이며 지도 마커 기능은 아직 구현하지 않았습니다.
+Leaflet 지도에 SUMO에서 변환한 실제 강남 위도·경도로 차량 마커를 표시합니다. 현재 데이터는 **SUMO 시뮬레이션**이며 실제 차량 GPS 수신 기능은 아닙니다. 차량 목록·마커를 선택하면 속도(km/h), 좌표, 위치·속도의 개별 관측 시각을 확인할 수 있습니다. 검색, 최근 관측 필터, 전체 차량 보기, 강남 영역 복귀, 선택 차량 따라가기, 자동/수동 갱신을 지원합니다.
+
+새 위치가 오면 최대 800ms 동안 마커를 보간합니다. 같은 실행에서 5초 이내·150m 이내의 연속 위치만 보간하고, 단절 후 복구·큰 위치 변화·새 실행은 최신 좌표로 즉시 이동합니다. 화면 보간은 원본 좌표와 DB 기록을 바꾸지 않습니다. 화면도 신호별 관측 시각을 비교해 늦게 온 과거 데이터로 최신 값을 되돌리지 않습니다.
+
+선택 차량의 궤적은 **이 화면에서 관측한 최근 80개 좌표**입니다. 전체 운행 이력을 DB에서 조회한 경로는 아닙니다. 신호가 15초 이내에 관측됐는지 표시하며, 이것을 차량 통신 연결 상태로 해석하지 않습니다. 조회 API 장애 중에도 마지막 위치·정보를 유지하고 자동 갱신으로 복구를 확인합니다.
+
+배경 지도는 OpenStreetMap 타일을 사용하며 Leaflet 1.9.4 JS/CSS는 저장소에 포함했습니다. 타일 연결이 실패하면 기존 SUMO 도로망에서 추출한 `frontend/gangnam_roads.geojson`의 304개 도로를 표시합니다. 지도 중심·초기 줌·타일 URL은 `frontend/map_config.json`에서 설정합니다. 다른 타일 서비스로 바꾸면 API의 이미지 CSP 허용 주소도 함께 수정해야 합니다. 작은 화면에서는 지도와 상세 패널을 먼저 보여주고 차량 목록을 아래에 배치합니다.
 
 - 목록: `GET /api/vehicles?signals=location,speed_mps&limit=50&offset=0`
 - 차량: `GET /api/vehicles/car-1?signals=location`
@@ -316,7 +322,7 @@ Consumer는 하나의 DB 트랜잭션에서 다음을 처리하고, 완료 후 �
 
 예를 들어 10:05 위치 C 이후 10:01 위치 A가 도착하면 이력에는 둘 다 남고 최신 위치는 C입니다. 위치는 10:05에, 속도는 10:03에 관측될 수 있으므로 신호별 시간을 각각 비교합니다. event_time은 UTC로 정규화한 뒤 비교하며, 서로 다른 실행의 순번만 비교하지 않습니다.
 
-Kafka 커밋 실패 후 같은 기록을 다시 소비해도 중복 저장하지 않습니다. 데이터 검증·DB 저장 실패 시 해당 오프셋을 넘기지 않고 Consumer가 중단합니다. Kafka 일시 오류는 재연결을 기다립니다. 차량 목록 화면은 Redis로 조회하며, 지도 위에 위치를 표시하는 기능은 아직 구현하지 않았습니다.
+Kafka 커밋 실패 후 같은 기록을 다시 소비해도 중복 저장하지 않습니다. 데이터 검증·DB 저장 실패 시 해당 오프셋을 넘기지 않고 Consumer가 중단합니다. Kafka 일시 오류는 재연결을 기다립니다. 차량 지도·목록·상세 정보는 조회 API를 통해 Redis 최신 상태를 읽습니다. 서버 이력 DB 조회 API는 아직 구현하지 않았습니다.
 
 ## 버퍼 정책과 보장 범위
 
@@ -332,9 +338,10 @@ Kafka 커밋 실패 후 같은 기록을 다시 소비해도 중복 저장하지
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 node tests\test_vehicle_state.js
+node tests\test_map_motion.js
 ```
 
-임시 SQLite와 로컬 WebSocket으로 Kafka 최종 성공 전 버퍼 보관, ACK 유실·재전송, 신호별 최신 후보, 단절·복구, 직접 Kafka 전송 및 연결·오류 작업 한도를 검증합니다. 이력 DB·Redis는 저장 후 오프셋 커밋, 중복·과거 기록 처리, 원자적 갱신·장애 복구를 검증합니다. 조회 API의 캐시 조회·필터·오류 응답과 Pub/Sub 없이 조회되는 동작도 확인합니다. Node 테스트는 화면 최신 상태 비교를 검증합니다.
+임시 SQLite와 로컬 WebSocket으로 Kafka 최종 성공 전 버퍼 보관, ACK 유실·재전송, 신호별 최신 후보, 단절·복구, 직접 Kafka 전송 및 연결·오류 작업 한도를 검증합니다. 이력 DB·Redis는 저장 후 오프셋 커밋, 중복·과거 기록 처리, 원자적 갱신·장애 복구를 검증합니다. 조회 API의 캐시 조회·필터·오류 응답과 Pub/Sub 없이 조회되는 동작도 확인합니다. Node 테스트는 화면 최신 상태 비교와 위치 보간·단절 후 즉시 이동 조건을 검증합니다.
 
 실제 SUMO·SQLite·WebSocket·Kafka 3개 브로커·Redis 검증 스크립트는 임시 DB·별도 토픽·캐시를 사용합니다. `--fault-injection`은 이 vol.2 Compose의 Redis·Kafka를 실제 중단·재시작하며, 종료 시 복구합니다.
 
@@ -342,10 +349,18 @@ node tests\test_vehicle_state.js
 .\.venv\Scripts\python.exe scripts\verify_live_pipeline.py --fault-injection --report data/live-verification-kafka-only.json
 ```
 
-현재 Kafka 단일 수신 구조의 결과는 [Dispatcher 제거 후 검증](docs/verification-2026-10-06-kafka-only.md)에 기록합니다. [이전 Dispatcher 구조 검증](docs/verification-2026-10-06.md)은 당시 구조의 실험 기록입니다.
+지도 화면의 실제 데이터·브라우저 검증은 [강남 관제 지도 검증](docs/verification-2026-10-06-map.md)에 기록합니다. 현재 Kafka 단일 수신 구조의 결과는 [Dispatcher 제거 후 검증](docs/verification-2026-10-06-kafka-only.md)에 기록합니다. [이전 Dispatcher 구조 검증](docs/verification-2026-10-06.md)은 당시 구조의 실험 기록입니다.
 
 기존 직접 전송 구조의 실험 기록: [part-3](docs/blog/part-3/part-3.md). 새 수신 서버 구조의 실험 결과와는 구분합니다.
 
 ## 지도 데이터
 
-시나리오 도로 데이터는 OpenStreetMap 기반입니다. © OpenStreetMap contributors. 라이선스 및 저작자 표시: https://www.openstreetmap.org/copyright
+시나리오 도로 데이터와 배경 타일은 OpenStreetMap 기반입니다. © OpenStreetMap contributors. [저작자 표시·라이선스](https://www.openstreetmap.org/copyright), [타일 사용 정책](https://operations.osmfoundation.org/policies/tiles/). 화면 우측 하단에 저작자 표시를 유지합니다. 타일을 일괄 다운로드하거나 오프라인 캐시를 만들지 않습니다. 로컬 도로망은 이미 보유한 SUMO 파일에서 생성합니다.
+
+Leaflet 1.9.4는 BSD 2-Clause 라이선스이며 `frontend/vendor/leaflet/LICENSE`에 원문을 포함합니다. [Leaflet 공식 배포](https://leafletjs.com/download.html).
+
+도로망이 바뀌었을 때 다음 명령으로 지도용 도로를 다시 생성합니다. SUMO와 traci가 필요하며 차량 버퍼·Kafka 데이터는 변경하지 않습니다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_gangnam_roads.py
+```

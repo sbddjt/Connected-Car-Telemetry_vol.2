@@ -1,0 +1,5 @@
+{
+  "tile_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  "center": [37.4973, 127.0303],
+  "zoom": 16
+}
