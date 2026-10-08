@@ -1,0 +1,82 @@
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "redis"
+  namespace: "telemetry-v2"
+spec:
+  selector:
+    app: "redis"
+  ports:
+    -
+      name: "tcp"
+      port: 6379
+      targetPort: 6379
+  clusterIP: "None"
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "redis"
+  namespace: "telemetry-v2"
+spec:
+  serviceName: "redis"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "redis"
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: "Retain"
+    whenScaled: "Retain"
+  template:
+    metadata:
+      labels:
+        app: "redis"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        -
+          name: "redis"
+          image: "redis:8.2-alpine"
+          args:
+            - "redis-server"
+            - "--appendonly"
+            - "yes"
+            - "--appendfsync"
+            - "always"
+            - "--maxmemory-policy"
+            - "noeviction"
+          ports:
+            -
+              containerPort: 6379
+          volumeMounts:
+            -
+              name: "data"
+              mountPath: "/data"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          readinessProbe:
+            exec:
+              command:
+                - "redis-cli"
+                - "ping"
+          startupProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 5
+            failureThreshold: 60
+  volumeClaimTemplates:
+    -
+      metadata:
+        name: "data"
+      spec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: "1Gi"

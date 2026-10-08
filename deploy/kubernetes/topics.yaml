@@ -1,0 +1,32 @@
+apiVersion: "batch/v1"
+kind: "Job"
+metadata:
+  name: "kafka-topics"
+  namespace: "telemetry-v2"
+spec:
+  backoffLimit: 12
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
+      containers:
+        -
+          name: "create-topics"
+          image: "apache/kafka:4.3.1"
+          command:
+            - "/bin/bash"
+            - "-ec"
+          args:
+            - "set -eu\nfor topic in vehicle-telemetry-v1 vehicle-connectivity-v1 vehicle-errors-v1; do\n  /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-0.kafka:9092,kafka-1.kafka:9092,kafka-2.kafka:9092 --create --if-not-exists --topic \"$topic\" --partitions 12 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=-1 --config retention.bytes=-1 --config cleanup.policy=delete\n  /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-0.kafka:9092,kafka-1.kafka:9092,kafka-2.kafka:9092 --entity-type topics --entity-name \"$topic\" --alter --add-config min.insync.replicas=2,retention.ms=-1,retention.bytes=-1,cleanup.policy=delete\ndone\n"
+          env:
+            -
+              name: "KAFKA_HEAP_OPTS"
+              value: "-Xms128m -Xmx256m"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"

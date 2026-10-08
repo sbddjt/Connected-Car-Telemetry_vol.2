@@ -1,0 +1,12 @@
+apiVersion: "v1"
+kind: "ConfigMap"
+metadata:
+  name: "telemetry-runtime"
+  namespace: "telemetry-v2"
+data:
+  SERVER_FLEET_TELEMETRY_HOST: "0.0.0.0"
+  SERVER_QUERY_API_HOST: "0.0.0.0"
+  SERVER_KAFKA_BOOTSTRAP_SERVERS: "kafka-0.kafka:9092"
+  SERVER_MONGODB_URI: "mongodb://mongodb:27017"
+  SERVER_REDIS_URL: "redis://redis:6379/0"
+  SHARED_PIPELINE_METRICS_DIRECTORY: "/app/data/runtime/metrics"

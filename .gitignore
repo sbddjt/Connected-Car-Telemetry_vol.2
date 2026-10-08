@@ -26,3 +26,6 @@ Thumbs.db
 # Expanded scenario generator intermediates (compressed runtime assets are tracked)
 scenario/gangnam_expanded/*.rou.xml
 scenario/gangnam_expanded/*.trips.xml
+
+# Generated image and deployment artifacts
+.build/

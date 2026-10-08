@@ -1,0 +1,81 @@
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "mongodb"
+  namespace: "telemetry-v2"
+spec:
+  selector:
+    app: "mongodb"
+  ports:
+    -
+      name: "tcp"
+      port: 27017
+      targetPort: 27017
+  clusterIP: "None"
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "mongodb"
+  namespace: "telemetry-v2"
+spec:
+  serviceName: "mongodb"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "mongodb"
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: "Retain"
+    whenScaled: "Retain"
+  template:
+    metadata:
+      labels:
+        app: "mongodb"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        -
+          name: "mongodb"
+          image: "mongo:8.0"
+          args:
+            - "--bind_ip_all"
+            - "--wiredTigerCacheSizeGB"
+            - "0.25"
+          ports:
+            -
+              containerPort: 27017
+          volumeMounts:
+            -
+              name: "data"
+              mountPath: "/data/db"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          readinessProbe:
+            exec:
+              command:
+                - "mongosh"
+                - "--quiet"
+                - "--eval"
+                - "db.adminCommand({ping:1}).ok"
+            timeoutSeconds: 5
+          startupProbe:
+            tcpSocket:
+              port: 27017
+            periodSeconds: 5
+            failureThreshold: 60
+  volumeClaimTemplates:
+    -
+      metadata:
+        name: "data"
+      spec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: "5Gi"

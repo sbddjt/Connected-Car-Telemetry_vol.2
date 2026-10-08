@@ -1,0 +1,142 @@
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "vehicle-simulator"
+  namespace: "telemetry-v2"
+spec:
+  selector:
+    app: "vehicle-simulator"
+  ports:
+    -
+      name: "tcp"
+      port: 8765
+      targetPort: 8765
+  clusterIP: "None"
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "vehicle-simulator"
+  namespace: "telemetry-v2"
+spec:
+  serviceName: "vehicle-simulator"
+  replicas: 0
+  selector:
+    matchLabels:
+      app: "vehicle-simulator"
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: "Retain"
+    whenScaled: "Retain"
+  template:
+    metadata:
+      labels:
+        app: "vehicle-simulator"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        -
+          name: "collector"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0-simulator"
+          args:
+            - "vehicle-collector"
+            - "--sumo-end-seconds"
+            - "120"
+            - "--sumo-max-vehicles"
+            - "20"
+          env:
+            -
+              name: "VEHICLE_SQLITE_BUFFER_DB_PATH"
+              value: "/app/data/vehicle/event_buffer.db"
+            -
+              name: "VEHICLE_BUFFER_OVERFLOW_POLICY"
+              value: "block"
+            -
+              name: "VEHICLE_FLEET_TELEMETRY_SERVER_URL"
+              value: "ws://receiver:8765"
+            -
+              name: "VEHICLE_MAX_IN_FLIGHT_MESSAGES"
+              value: "2"
+            -
+              name: "VEHICLE_SENDER_MAX_WORKERS"
+              value: "32"
+            -
+              name: "VEHICLE_SUMO_BINARY"
+              value: "sumo"
+            -
+              name: "VEHICLE_IDLE_AFTER_RUN"
+              value: "1"
+          volumeMounts:
+            -
+              name: "data"
+              mountPath: "/app/data"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+        -
+          name: "sender"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0"
+          args:
+            - "vehicle-sender"
+          env:
+            -
+              name: "VEHICLE_SQLITE_BUFFER_DB_PATH"
+              value: "/app/data/vehicle/event_buffer.db"
+            -
+              name: "VEHICLE_BUFFER_OVERFLOW_POLICY"
+              value: "block"
+            -
+              name: "VEHICLE_FLEET_TELEMETRY_SERVER_URL"
+              value: "ws://receiver:8765"
+            -
+              name: "VEHICLE_MAX_IN_FLIGHT_MESSAGES"
+              value: "2"
+            -
+              name: "VEHICLE_SENDER_MAX_WORKERS"
+              value: "32"
+            -
+              name: "VEHICLE_SUMO_BINARY"
+              value: "sumo"
+            -
+              name: "VEHICLE_IDLE_AFTER_RUN"
+              value: "1"
+          volumeMounts:
+            -
+              name: "data"
+              mountPath: "/app/data"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+  volumeClaimTemplates:
+    -
+      metadata:
+        name: "data"
+      spec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: "2Gi"

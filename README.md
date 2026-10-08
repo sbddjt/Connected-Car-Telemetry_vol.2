@@ -4,7 +4,15 @@ SUMO로 차량을 모방하고, 차량 내부 버퍼·수신 서버·Kafka·서�
 
 기존 프로젝트: https://github.com/sbddjt/Connected-Car-Telemetry
 
-## 현재 상태 (2026-10-07)
+## Kubernetes 운영 준비 (2026-10-08)
+
+Docker Hub 저장소 `sbddjt/connected-car-telemetry-v2`용 서버·SUMO Dockerfile, 빌드/업로드 및 Kubernetes 배포 스크립트를 추가했습니다.
+Kafka 3개·MongoDB·Redis·차량 SQLite에는 PVC를 사용하고, Kubernetes 실험의 버퍼 포화 정책은 기록 삭제 대신 SUMO 대기로 설정합니다.
+노트북용은 Kafka 1개·차량 상한 5대·60초부터 시작하고, 별도 복제 프로필은 Kafka 3개·20대를 유지합니다. 빌드/push/실제 배포 상태와 데이터 보존 범위는 [Kubernetes 가이드](docs/kubernetes.md)를 확인합니다.
+서버·SUMO 이미지의 Docker Hub 업로드와 Python 테스트 109개, Kubernetes 서버 측 사전 검증을 완료했습니다. 앱 정리 후 Kafka 1개의 Kubernetes 정상 기동을 확인했고, 다음 단계는 메모리 보호 조건에 걸려 중단했습니다. 현재 Kafka를 정지하고 Docker Desktop을 정상 종료한 상태이며 데이터 PVC를 유지했습니다. 전체 서비스 흐름 검증은 보류했습니다. [오늘 검증 기록](docs/verification-2026-10-08-kubernetes.md)과 [Docker Hub 한·영 설명](docs/docker-hub-description.md)을 확인합니다.
+이전 실험 및 중단 기록은 아래에 보존합니다.
+
+## 이전 실험 상태 (2026-10-07)
 
 강남 도로 확장·MongoDB 이력 저장·SQLite 버퍼 샤드·묶음 Consumer 처리를 구현했습니다. Python 테스트 99개와 Node 테스트 2종은 통과했습니다. 300대 동시 운행은 관찰했지만, 기존 미전송 데이터 재전송과 신규 데이터 수집을 함께 실행한 **전체 파이프라인의 지속 처리량 검증은 완료하지 못했습니다.**
 

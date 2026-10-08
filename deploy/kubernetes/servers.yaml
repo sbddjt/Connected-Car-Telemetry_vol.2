@@ -1,0 +1,302 @@
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "receiver"
+  namespace: "telemetry-v2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "receiver"
+  template:
+    metadata:
+      labels:
+        app: "receiver"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        -
+          name: "receiver"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0"
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - "receiver"
+          envFrom:
+            -
+              configMapRef:
+                name: "telemetry-runtime"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts:
+            -
+              name: "runtime"
+              mountPath: "/app/data"
+            -
+              name: "tmp"
+              mountPath: "/tmp"
+          ports:
+            -
+              containerPort: 8765
+          readinessProbe:
+            tcpSocket:
+              port: 8765
+            periodSeconds: 5
+          startupProbe:
+            tcpSocket:
+              port: 8765
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        -
+          name: "runtime"
+          emptyDir: {}
+        -
+          name: "tmp"
+          emptyDir: {}
+---
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "history-consumer"
+  namespace: "telemetry-v2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "history-consumer"
+  template:
+    metadata:
+      labels:
+        app: "history-consumer"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        -
+          name: "history-consumer"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0"
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - "history-consumer"
+          envFrom:
+            -
+              configMapRef:
+                name: "telemetry-runtime"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts:
+            -
+              name: "runtime"
+              mountPath: "/app/data"
+            -
+              name: "tmp"
+              mountPath: "/tmp"
+      volumes:
+        -
+          name: "runtime"
+          emptyDir: {}
+        -
+          name: "tmp"
+          emptyDir: {}
+---
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "redis-consumer"
+  namespace: "telemetry-v2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "redis-consumer"
+  template:
+    metadata:
+      labels:
+        app: "redis-consumer"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        -
+          name: "redis-consumer"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0"
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - "redis-consumer"
+          envFrom:
+            -
+              configMapRef:
+                name: "telemetry-runtime"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts:
+            -
+              name: "runtime"
+              mountPath: "/app/data"
+            -
+              name: "tmp"
+              mountPath: "/tmp"
+      volumes:
+        -
+          name: "runtime"
+          emptyDir: {}
+        -
+          name: "tmp"
+          emptyDir: {}
+---
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "query-api"
+  namespace: "telemetry-v2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "query-api"
+  template:
+    metadata:
+      labels:
+        app: "query-api"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        -
+          name: "query-api"
+          image: "sbddjt/connected-car-telemetry-v2:v0.1.0"
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - "query-api"
+          envFrom:
+            -
+              configMapRef:
+                name: "telemetry-runtime"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts:
+            -
+              name: "runtime"
+              mountPath: "/app/data"
+            -
+              name: "tmp"
+              mountPath: "/tmp"
+          ports:
+            -
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: "/api/health"
+              port: 8080
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: "/"
+              port: 8080
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: "/"
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        -
+          name: "runtime"
+          emptyDir: {}
+        -
+          name: "tmp"
+          emptyDir: {}
+---
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "receiver"
+  namespace: "telemetry-v2"
+spec:
+  selector:
+    app: "receiver"
+  ports:
+    -
+      name: "tcp"
+      port: 8765
+      targetPort: 8765
+---
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "query-api"
+  namespace: "telemetry-v2"
+spec:
+  selector:
+    app: "query-api"
+  ports:
+    -
+      name: "tcp"
+      port: 8080
+      targetPort: 8080

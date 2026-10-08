@@ -1,0 +1,11 @@
+apiVersion: "kustomize.config.k8s.io/v1beta1"
+kind: "Kustomization"
+resources:
+  - "namespace.yaml"
+  - "config.yaml"
+  - "kafka.yaml"
+  - "topics.yaml"
+  - "mongodb.yaml"
+  - "redis.yaml"
+  - "servers.yaml"
+  - "simulator.yaml"

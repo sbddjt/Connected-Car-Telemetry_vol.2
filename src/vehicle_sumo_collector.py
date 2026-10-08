@@ -7,7 +7,7 @@ from shared_pipeline_metrics import PipelineMetrics
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
-from vehicle_sqlite_buffer import VehicleSQLiteBuffer
+from vehicle_sqlite_buffer import VehicleSQLiteBuffer, BufferCapacityExceeded
 from vehicle_sharded_buffer import ShardedVehicleSQLiteBuffer
 from shared_fleet_telemetry_policy import BUCKET_SECONDS, BUFFER_MESSAGES_PER_VEHICLE, SignalCollector
 
@@ -35,15 +35,25 @@ def parse_args(argv=None):
     add_env_argument(parser, "--sumo-config", env="VEHICLE_SUMO_CONFIG_PATH",
                      default=SUMO_CONFIG, type=project_path)
     add_env_argument(parser, "--sumo-binary", env="VEHICLE_SUMO_BINARY", default="sumo-gui")
+    parser.add_argument("--sumo-max-vehicles", type=int, default=None,
+                        help="Override SUMO concurrent vehicle limit for a small deployment check")
     parser.add_argument("--sumo-end-seconds", type=float, default=None,
                         help="검증용 시뮬레이션 종료 시각; 생략하면 전체 시나리오")
     add_env_argument(parser, "--vehicle-buffer-directory", env="VEHICLE_SQLITE_BUFFER_DIRECTORY", default=None, type=lambda value: project_path(value) if value else None)
     add_env_argument(parser, "--vehicle-buffer-shards", env="VEHICLE_BUFFER_SHARDS", default=8, type=int)
+    add_env_argument(parser, "--vehicle-buffer-overflow-policy", env="VEHICLE_BUFFER_OVERFLOW_POLICY",
+                     default="drop_oldest")
     args = parser.parse_args(argv)
+    if args.vehicle_buffer_overflow_policy not in {"drop_oldest", "block"}:
+        parser.error("vehicle-buffer-overflow-policy supports drop_oldest or block")
+    if args.vehicle_buffer_overflow_policy == "block" and args.vehicle_buffer_directory:
+        parser.error("block policy requires a single vehicle-buffer-db; shard transactions are independent")
     if not 1 <= args.vehicle_buffer_shards <= 64:
         parser.error("Require 1 <= vehicle-buffer-shards <= 64")
     if args.sumo_end_seconds is not None and (not math.isfinite(args.sumo_end_seconds) or args.sumo_end_seconds <= 0):
         parser.error("Require positive finite --sumo-end-seconds")
+    if args.sumo_max_vehicles is not None and args.sumo_max_vehicles < 1:
+        parser.error("Require positive --sumo-max-vehicles")
     if args.vehicle_buffer_max_messages < 1:
         parser.error("VEHICLE_BUFFER_MAX_MESSAGES must be positive")
     try:
@@ -51,6 +61,17 @@ def parse_args(argv=None):
     except (OSError, ValueError) as error:
         parser.error(str(error))
     return args
+
+
+def save_collected_batch(buffer, batch, retry_seconds=1.0):
+    """Freeze this simulation step while the sender makes room; retry identical IDs."""
+    while True:
+        try:
+            buffer.save_many(batch)
+            return
+        except BufferCapacityExceeded:
+            print("[버퍼 대기] 미확인 기록 보존; SUMO 진행을 멈추고 ACK 삭제를 기다립니다.")
+            time.sleep(retry_seconds)
 
 
 def main(argv=None) -> None:
@@ -63,7 +84,8 @@ def main(argv=None) -> None:
     buffer = (ShardedVehicleSQLiteBuffer(args.vehicle_buffer_directory, args.vehicle_buffer_shards,
                                          max_events=args.vehicle_buffer_max_messages)
               if args.vehicle_buffer_directory else VehicleSQLiteBuffer(
-                  args.vehicle_buffer_db, max_events=args.vehicle_buffer_max_messages, per_vehicle=True))
+                  args.vehicle_buffer_db, max_events=args.vehicle_buffer_max_messages, per_vehicle=True,
+                  overflow_policy=args.vehicle_buffer_overflow_policy))
     sumo_started = False
     metrics = PipelineMetrics("vehicle-collector")
     total_stored = total_departed = total_arrived = 0
@@ -71,13 +93,11 @@ def main(argv=None) -> None:
 
     try:
         # Kafka 상태와 관계없이 SUMO 수집을 시작합니다.
-        traci.start([
-            args.sumo_binary,
-            "-c",
-            str(args.sumo_config),
-            "--step-length",
-            str(STEP_SECONDS),
-        ])
+        sumo_command = [args.sumo_binary, "-c", str(args.sumo_config),
+                        "--step-length", str(STEP_SECONDS)]
+        if args.sumo_max_vehicles is not None:
+            sumo_command += ["--max-num-vehicles", str(args.sumo_max_vehicles)]
+        traci.start(sumo_command)
         sumo_started = True
 
         while (traci.simulation.getMinExpectedNumber() > 0
@@ -122,7 +142,7 @@ def main(argv=None) -> None:
                 batch.append(event)
 
             # 모든 차량의 선택 기록을 함께 커밋한 뒤 수집 상태를 갱신합니다.
-            buffer.save_many(batch)
+            save_collected_batch(buffer, batch)
             for event in batch:
                 collector.committed(event["vehicle_id"], event["signals"], simulation_time)
                 vehicle_sequences[event["vehicle_id"]] = event["sequence_no"]

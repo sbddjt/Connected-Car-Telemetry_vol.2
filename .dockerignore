@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!requirements.txt
+!src/
+!src/**
+!config/
+!config/*.json
+!config/gangnam_expanded_sumo.sumocfg
+!frontend/
+!frontend/**
+!scenario/
+!scenario/gangnam_expanded/
+!scenario/gangnam_expanded/*.gz
+**/__pycache__
+**/*.pyc

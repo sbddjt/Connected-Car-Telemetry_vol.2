@@ -5,8 +5,16 @@ from pathlib import Path
 from shared_fleet_telemetry_policy import signals_of
 
 
+class BufferCapacityExceeded(RuntimeError):
+    """The entire new batch was rolled back; existing unacknowledged events remain."""
+
+
 class VehicleSQLiteBuffer:
-    def __init__(self, db_path: Path, max_events: int = 5_000, per_vehicle: bool = True):
+    def __init__(self, db_path: Path, max_events: int = 5_000, per_vehicle: bool = True,
+                 overflow_policy: str = "drop_oldest"):
+        if overflow_policy not in {"drop_oldest", "block"}:
+            raise ValueError("overflow_policy supports drop_oldest or block")
+        self.overflow_policy = overflow_policy
         if max_events < 1:
             raise ValueError("max_events must be at least 1")
 
@@ -82,6 +90,14 @@ class VehicleSQLiteBuffer:
                 count = self.connection.execute(f"SELECT COUNT(*) FROM events WHERE {scope}", args).fetchone()[0]
                 overflow = count-self.max_events
                 if overflow > 0:
+                    if self.overflow_policy == "block":
+                        # Completed legacy rows may be removed, never unacknowledged rows.
+                        self.connection.execute(f"DELETE FROM events WHERE {scope} AND delivered=1", args)
+                        pending = self.connection.execute(
+                            f"SELECT COUNT(*) FROM events WHERE {scope}", args).fetchone()[0]
+                        if pending > self.max_events:
+                            raise BufferCapacityExceeded(f"Vehicle buffer is full: {vehicle_id}")
+                        continue
                     victims = self.connection.execute(
                         f"SELECT id, delivered FROM events WHERE {scope} ORDER BY delivered DESC, id ASC LIMIT ?",
                         (*args, overflow)).fetchall()
